@@ -12,7 +12,7 @@ async function db() {
     return await mysql.createConnection(dbConfig); 
 }
 
-// 1. Obtener lista de vendedores para el filtro
+// 1. Obtener lista de vendedores para el filtro dinámico
 async function obtenerVendedores() {
     const conn = await db();
     const [rows] = await conn.execute("SELECT DISTINCT vendedor FROM tab_clientes WHERE vendedor != '' ORDER BY vendedor ASC");
@@ -20,7 +20,7 @@ async function obtenerVendedores() {
     return rows;
 }
 
-// 2. Obtener lista de zonas para el filtro
+// 2. Obtener lista de zonas para el filtro dinámico
 async function obtenerZonas() {
     const conn = await db();
     const [rows] = await conn.execute("SELECT DISTINCT zona FROM tab_clientes WHERE zona != '' ORDER BY zona ASC");
@@ -32,6 +32,7 @@ async function obtenerZonas() {
 async function obtenerListaDeudores(filtros) {
     const conn = await db();
     
+    // SQL optimizado: Agrupa por cliente para evitar repetir filas por factura
     let sql = `
         SELECT 
             c.id_cliente, 
@@ -47,6 +48,8 @@ async function obtenerListaDeudores(filtros) {
     `;
     
     const params = [];
+    
+    // Filtros dinámicos
     if (filtros.vendedor) {
         sql += " AND c.vendedor = ?";
         params.push(filtros.vendedor);
@@ -63,90 +66,99 @@ async function obtenerListaDeudores(filtros) {
     return rows;
 }
 
-// 4. Generar el HTML del Panel de Cobranza con el botón de WhatsApp
+// 4. Generar el HTML del Panel de Cobranza (Ancho Completo)
 async function generarHTML(vendedores, zonas, deudores, header, q) {
     return `<!DOCTYPE html>
     <html lang="es">
     <head>
         <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
         <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
         <title>Cobranza ONE4CARS</title>
         <style>
-            .card-cobranza { border-radius: 15px; border: none; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
-            .st-sticky { position: sticky; top: 20px; }
+            body { background-color: #f8f9fa; }
+            .card-custom { border-radius: 15px; border: none; box-shadow: 0 4px 12px rgba(0,0,0,0.08); }
+            .table-full { width: 100% !important; }
+            .btn-send { transition: all 0.3s; }
+            .btn-send:hover { transform: scale(1.02); }
         </style>
     </head>
-    <body class="bg-light">
+    <body>
         ${header}
+        
         <div class="container-fluid px-4">
-            <div class="row">
-                <!-- Panel de Control (Lado Izquierdo) -->
-                <div class="col-md-3">
-                    <div class="card card-cobranza p-4 st-sticky">
-                        <h4>💰 Cobranzas</h4>
-                        <hr>
-                        <form method="GET" action="/cobranza" class="mb-4">
-                            <label class="form-label small fw-bold">Vendedor:</label>
-                            <select name="vendedor" class="form-select mb-3">
-                                <option value="">Todos</option>
-                                ${vendedores.map(v => `<option value="${v.vendedor}" ${q.vendedor === v.vendedor ? 'selected' : ''}>${v.vendedor}</option>`).join('')}
-                            </select>
-
-                            <label class="form-label small fw-bold">Zona:</label>
-                            <select name="zona" class="form-select mb-3">
-                                <option value="">Todas</option>
-                                ${zonas.map(z => `<option value="${z.zona}" ${q.zona === z.zona ? 'selected' : ''}>${z.zona}</option>`).join('')}
-                            </select>
-                            <button type="submit" class="btn btn-dark w-100">Filtrar Deudores</button>
+            
+            <!-- SECCIÓN DE FILTROS (ARRIBA PARA DAR ESPACIO A LA TABLA) -->
+            <div class="card card-custom p-4 mb-4">
+                <div class="row align-items-end">
+                    <div class="col-md-4">
+                        <h4 class="mb-0">💰 Gestión de Cobros</h4>
+                        <p class="text-muted small">Filtre clientes y envíe recordatorios masivos.</p>
+                    </div>
+                    <div class="col-md-3">
+                        <form method="GET" action="/cobranza" class="row g-2">
+                            <div class="col-6">
+                                <label class="form-label small fw-bold">Vendedor:</label>
+                                <select name="vendedor" class="form-select">
+                                    <option value="">Todos</option>
+                                    ${vendedores.map(v => `<option value="${v.vendedor}" ${q.vendedor === v.vendedor ? 'selected' : ''}>${v.vendedor}</option>`).join('')}
+                                </select>
+                            </div>
+                            <div class="col-6">
+                                <label class="form-label small fw-bold">Zona:</label>
+                                <select name="zona" class="form-select">
+                                    <option value="">Todas</option>
+                                    ${zonas.map(z => `<option value="${z.zona}" ${q.zona === z.zona ? 'selected' : ''}>${z.zona}</option>`).join('')}
+                                </select>
+                            </div>
+                            <div class="col-12 mt-3">
+                                <button type="submit" class="btn btn-dark w-100">Aplicar Filtros</button>
+                            </div>
                         </form>
-                        
-                        <div class="alert alert-warning small">
-                            <strong>Aviso:</strong> Al hacer clic en enviar, el bot enviará un recordatorio individual a cada cliente seleccionado.
-                        </div>
-
-                        <button onclick="enviarCobranzaMasiva()" class="btn btn-danger btn-lg w-100 shadow">🚀 Enviar Recordatorios WhatsApp</button>
-                        <div id="status" class="mt-3 small text-center fw-bold"></div>
+                    </div>
+                    <div class="col-md-5 text-end">
+                        <button onclick="enviarCobranzaMasiva()" class="btn btn-danger btn-lg px-5 btn-send shadow">🚀 Enviar WhatsApp a Seleccionados</button>
+                        <div id="status" class="mt-2 small fw-bold"></div>
                     </div>
                 </div>
+            </div>
 
-                <!-- Tabla de Clientes (Lado Derecho) -->
-                <div class="col-md-9">
-                    <div class="card card-cobranza p-4">
-                        <div class="d-flex justify-content-between align-items-center mb-3">
-                            <h5>Clientes Pendientes: ${deudores.length}</h5>
-                            <div class="form-check">
-                                <input class="form-check-input" type="checkbox" id="selectAll" checked onclick="toggleAll()">
-                                <label class="form-check-label">Seleccionar Todos</label>
-                            </div>
-                        </div>
-                        <div class="table-responsive">
-                            <table class="table table-hover align-middle">
-                                <thead class="table-light">
-                                    <tr>
-                                        <th>Select</th>
-                                        <th>Cliente</th>
-                                        <th>Celular</th>
-                                        <th>Zona</th>
-                                        <th>Vendedor</th>
-                                        <th>Facturas</th>
-                                        <th>Deuda Total</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    ${deudores.map(d => `
-                                    <tr>
-                                        <td><input type="checkbox" class="client-check" value="${d.id_cliente}" checked></td>
-                                        <td><strong>${d.nombres}</strong></td>
-                                        <td>${d.celular}</td>
-                                        <td><span class="badge bg-secondary">${d.zona}</span></td>
-                                        <td>${d.vendedor}</td>
-                                        <td>${d.cantidad_facturas}</td>
-                                        <td class="text-danger fw-bold">$${parseFloat(d.saldo_total).toFixed(2)}</td>
-                                    </tr>`).join('')}
-                                </tbody>
-                            </table>
-                        </div>
+            <!-- TABLA A LO ANCHO (SIN SCROLL) -->
+            <div class="card card-custom p-4">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                    <h5>Clientes con Deuda Pendiente (${deudores.length})</h5>
+                    <div class="form-check">
+                        <input class="form-check-input" type="checkbox" id="selectAll" checked onclick="toggleAll()">
+                        <label class="form-check-label small">Seleccionar Todos</label>
                     </div>
+                </div>
+                
+                <div class="table-responsive">
+                    <table class="table table-hover align-middle table-full">
+                        <thead class="table-light">
+                            <tr>
+                                <th style="width: 40px;">Sel</th>
+                                <th>Cliente</th>
+                                <th>Celular</th>
+                                <th>Zona</th>
+                                <th>Vendedor</th>
+                                <th class="text-center">Facturas</th>
+                                <th class="text-end">Deuda Total</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${deudores.length > 0 ? deudores.map(d => `
+                            <tr>
+                                <td><input type="checkbox" class="client-check" value="${d.id_cliente}" checked></td>
+                                <td><strong>${d.nombres}</strong></td>
+                                <td>${d.celular}</td>
+                                <td><span class="badge bg-secondary">${d.zona}</span></td>
+                                <td>${d.vendedor}</td>
+                                <td class="text-center">${d.cantidad_facturas}</td>
+                                <td class="text-end text-danger fw-bold">$${parseFloat(d.saldo_total).toFixed(2)}</td>
+                            </tr>`).join('') : `<tr><td colspan="7" class="text-center text-muted">No hay deudores con los filtros seleccionados.</td></tr>`}
+                        </tbody>
+                    </table>
                 </div>
             </div>
         </div>
@@ -162,7 +174,8 @@ async function generarHTML(vendedores, zonas, deudores, header, q) {
                 if (selected.length === 0) return alert("Selecciona al menos un cliente.");
 
                 const status = document.getElementById('status');
-                status.innerHTML = "⏳ Enviando recordatorios... No cierres la página.";
+                status.className = "mt-2 small fw-bold text-primary";
+                status.innerHTML = "⏳ Enviando recordatorios... Por favor espere.";
                 
                 try {
                     const response = await fetch('/enviar-cobranza', {
@@ -172,12 +185,15 @@ async function generarHTML(vendedores, zonas, deudores, header, q) {
                     });
                     
                     if (response.ok) {
-                        status.innerHTML = "✅ ¡Recordatorios enviados con éxito!";
-                        alert("Los mensajes han sido enviados a través del Bot.");
+                        status.className = "mt-2 small fw-bold text-success";
+                        status.innerHTML = "✅ ¡Mensajes enviados con éxito!";
+                        alert("Los recordatorios han sido enviados a través del Bot.");
                     } else {
-                        status.innerHTML = "❌ Error al enviar.";
+                        status.className = "mt-2 small fw-bold text-danger";
+                        status.innerHTML = "❌ Error al procesar el envío.";
                     }
                 } catch (e) {
+                    status.className = "mt-2 small fw-bold text-danger";
                     status.innerHTML = "❌ Error de conexión con el servidor.";
                 }
             }
@@ -186,7 +202,6 @@ async function generarHTML(vendedores, zonas, deudores, header, q) {
     </html>`;
 }
 
-// Exportamos las funciones para que index.js las use
 module.exports = { 
     obtenerVendedores, 
     obtenerZonas, 
