@@ -219,23 +219,7 @@ async function startBot() {
 }
 
 // ===== SERVER =====
-const server = http.createServer(async (req, res) => {
 
-    const parsed = url.parse(req.url, true);
-
-    if (parsed.pathname === '/panel') {
-        const chats = await getChats();
-
-        res.end(`
-        <h2>Panel</h2>
-        ${chats.map(c => `
-        <p>${c.telefono} - ${c.modo}
-        <a href="/modo?tel=${c.telefono}&modo=${c.modo === 'bot' ? 'humano' : 'bot'}">Cambiar</a>
-        </p>
-        `).join('')}
-        `);
-        return;
-    }
 
     if (parsed.pathname === '/modo') {
         await setModo(parsed.query.tel, parsed.query.modo);
@@ -252,7 +236,11 @@ const server = http.createServer(async (req, res) => {
 });
 
 // 🔥 IMPORTANTE: SOLO UNA VEZ
-server.listen(PORT, () => {
-    console.log("Servidor corriendo en puerto", PORT);
-    startBot();
-});
+)
+module.exports = {
+    obtenerVendedores: async () => { /* implementa la lógica que tenías en index si es necesario */ },
+    obtenerZonas: async () => { /* ... */ },
+    obtenerListaDeudores: async (query) => { /* ... */ },
+    generarHTML: async (v, z, d, header, query) => { /* ... */ },
+    // Exporta cualquier otra función que necesites usar en index.js
+};;
