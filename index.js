@@ -178,19 +178,18 @@ async function buscarCliente(rifLimpio) {
     return r[0] || null;
 }
 
-// NUEVA FUNCIÓN: Búsqueda inteligente de productos para la IA
+// NUEVA FUNCIÓN: Búsqueda en tab_productos
 async function buscarProductoPorTexto(texto) {
     const palabras = normalizar(texto).split(' ').filter(p => p.length > 2);
     if (palabras.length === 0) return null;
 
     const conn = await db();
-    // Buscamos en la descripción del producto
     let query = "SELECT producto, descripcion, tipo FROM tab_productos WHERE ";
     let conditions = palabras.map(() => "descripcion LIKE ?").join(" AND ");
     let params = palabras.map(p => `%${p}%`);
 
     try {
-        const [rows] = await conn.execute(query + conditions + " LIMIT 3", params);
+        const [rows] = await conn.execute(query + conditions + " LIMIT 5", params);
         await conn.end();
         return rows.length > 0 ? rows : null;
     } catch (e) {
@@ -288,7 +287,7 @@ async function startBot() {
         const sesion = await getSesion(from);
         if (sesion && sesion.modo === 'humano' && !isAdmin) return;
 
-        // ⭐ 3. LÓGICA DE ADMINISTRADOR MAESTRO
+        // ⭐ 3. LÓGICA DE ADMINISTRADOR MAESTRO (EL JEFE)
         if (isAdmin) {
             const fechaHora = new Date().toLocaleString('es-VE', { timeZone: 'America/Caracas' });
             const saludoJefe = `⭐ *HOLA JEFE / ADMINISTRADOR*\n\nBienvenido de nuevo. Hoy es ${fechaHora}.\n\n*Tasas:* BCV: ${dolarInfo.bcv} | Paralelo: ${dolarInfo.paralelo}\n\nUsted tiene acceso total. Puede enviar cualquier RIF para consultar el estado de cuenta de un cliente o escribir *menu* para ver las opciones del sistema.`;
@@ -302,6 +301,7 @@ async function startBot() {
                 return await sock.sendMessage(from, { text: saludoJefe });
             }
 
+            // Consulta RIF Master corregida (Eliminada opción VER)
             if (rifDetectado.length >= 6 && /^\d+$/.test(rawText.replace(/\s/g, ''))) {
                 const c = await buscarCliente(rifDetectado);
                 if (c) {
@@ -315,15 +315,7 @@ async function startBot() {
                         facturas.forEach(f => {
                             const monto = (f.total - f.abono_factura) / (f.porcentaje || 1);
                             totalP += monto;
-                            const fReg = new Date(f.fecha_reg).toISOString().split('T')[0];
-                            const v_nom = (f.nombre_vendedor || "N/A").trim();
-                            const c_nom = (f.nombres || "N/A").trim();
-                            const c_dir = (f.direccion || "N/A").trim();
-                            const c_cel = (f.celular || "").trim();
-
-                            const params = `id_factura=${f.id_factura}&nro_factura=${f.nro_factura}&fecha_reg=${fReg}&total=${f.total}&abono_factura=${f.abono_factura}&nombres=${encodeURIComponent(c_nom)}&nombre=${encodeURIComponent(v_nom)}&direccion=${encodeURIComponent(c_dir)}&cedula=${f.cedula}&celular=${encodeURIComponent(c_cel)}&id_cliente=${f.id_cliente}&zona=${encodeURIComponent(f.zona || "")}&descuento=${f.descuento}&total_desc=${f.total_desc}`;
-                            
-                            list += `🔸 *#${f.nro_factura}* | $${monto.toFixed(2)}\n📄 Ver: https://one4cars.com/sevencorp/factura_full_reporte_web.php?${params}\n✍️ Firmada: https://www.one4cars.com/uploads/notas/${f.nro_factura}.jpg\n\n`;
+                            list += `🔸 *#${f.nro_factura}* | $${monto.toFixed(2)}\n✍️ Firmada: https://www.one4cars.com/uploads/notas/${f.nro_factura}.jpg\n\n`;
                         });
                         list += `💰 *Total Máster: $${totalP.toFixed(2)}*`;
                     }
@@ -367,36 +359,36 @@ async function startBot() {
             return await sock.sendMessage(from, { text: listado });
         }
 
-        // 🤖 4. IA GEMINI CON BÚSQUEDA DE PRODUCTOS
+        // 🤖 4. IA GEMINI CON BÚSQUEDA DE PRODUCTOS INTEGRADA
         try {
             const inst = fs.readFileSync('./instrucciones.txt', 'utf8');
             const historial = await obtenerHistorial(from);
             
-            // Verificamos si el usuario pregunta por un producto
-            let infoProductos = "";
-            if (text.length > 5 && !text.includes("saldo") && !isAdmin) {
-                const productosEncontrados = await buscarProductoPorTexto(rawText);
-                if (productosEncontrados) {
-                    infoProductos = "\n\nPRODUCTOS ENCONTRADOS EN BASE DE DATOS:\n";
-                    productosEncontrados.forEach(p => {
-                        infoProductos += `- Código: ${p.producto} | Tipo: ${p.tipo} | Descripción: ${p.descripcion}\n`;
-                        infoProductos += `- Ficha Técnica: https://one4cars.com/producto_general.php?cod=${p.producto}&tipo=${encodeURIComponent(p.tipo)}\n`;
+            // Inyectar búsqueda de productos en el contexto de la IA
+            let contextoProductos = "";
+            if (text.length > 4 && !isAdmin && !text.includes("saldo")) {
+                const prods = await buscarProductoPorTexto(rawText);
+                if (prods) {
+                    contextoProductos = "\n\nPRODUCTOS ENCONTRADOS EN NUESTRA BASE DE DATOS:\n";
+                    prods.forEach(p => {
+                        contextoProductos += `- Código: ${p.producto} | Tipo: ${p.tipo} | Descripción: ${p.descripcion}\n`;
+                        contextoProductos += `- Ficha técnica: https://one4cars.com/producto_general.php?cod=${p.producto}&tipo=${encodeURIComponent(p.tipo)}\n`;
                     });
-                    infoProductos += "\nUsa esta información para responder al cliente. Si hay medidas (como 70x26x17), menciónalas. Siempre incluye el link de la ficha técnica si corresponde.";
+                    contextoProductos += "\nUsa esta información técnica para responder al cliente. Si el cliente pregunta medidas, están en la descripción. Menciona siempre el link de la ficha técnica.";
                 }
             }
 
-            const prompt = `INSTRUCCIONES:\n${inst}\n\nCONTEXTO:\nDólar BCV: ${dolarInfo.bcv} | Paralelo: ${dolarInfo.paralelo}\nUsuario: ${pushName}${infoProductos}\n\nHISTORIAL:\n${historial}\n\nMENSAJE: ${rawText}`;
+            const prompt = `INSTRUCCIONES:\n${inst}\n\nCONTEXTO:\nDólar BCV: ${dolarInfo.bcv} | Paralelo: ${dolarInfo.paralelo}\nUsuario: ${pushName}${contextoProductos}\n\nHISTORIAL:\n${historial}\n\nMENSAJE: ${rawText}`;
             
             const result = await model.generateContent(prompt);
             const rIA = result.response.text();
             await guardarMensaje(from, 'model', rIA);
             await sock.sendMessage(from, { text: rIA });
-        } catch (e) { console.log("IA Error:", e); }
+        } catch (e) { console.log("IA Error"); }
     });
 }
 
-// ===== SERVIDOR HTTP COMPLETO =====
+// ===== SERVIDOR HTTP COMPLETO RESTAURADO =====
 const server = http.createServer(async (req, res) => {
     const parsedUrl = url.parse(req.url, true);
     const header = `<nav class="navbar navbar-dark bg-dark mb-4 shadow"><div class="container"><a class="navbar-brand fw-bold" href="/">ONE4CARS ADMIN</a></div></nav>`;
