@@ -20,10 +20,10 @@ const apiKey = process.env.GEMINI_API_KEY;
 const genAI = new GoogleGenerativeAI(apiKey);
 const model = genAI.getGenerativeModel({ 
     model: "gemini-1.5-flash", 
-    generationConfig: { temperature: 0.2, maxOutputTokens: 1000 } // Temperatura baja para evitar que la IA invente medidas
+    generationConfig: { temperature: 0.2, maxOutputTokens: 1000 } 
 });
 
-// POOL DE CONEXIONES (Optimización para evitar caídas de DB)
+// POOL DE CONEXIONES
 const pool = mysql.createPool({
     host: 'one4cars.com',
     user: 'juant200_one4car',
@@ -126,7 +126,7 @@ async function initDB() {
             fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci`);
         
-        console.log("✅ Base de Datos vinculada con Pool.");
+        console.log("✅ Base de Datos vinculada.");
     } catch (e) { console.log("❌ Error DB Init:", e.message); }
 }
 
@@ -148,27 +148,48 @@ async function buscarCliente(rifLimpio) {
     return r[0] || null;
 }
 
-// BÚSQUEDA DE PRODUCTOS (Súper optimizada)
+// BÚSQUEDA DE PRODUCTOS ULTRA-FLEXIBLE
 async function buscarProductoPorTexto(texto) {
     const txtNormal = normalizar(texto);
-    const stopWords = ['tienes', 'la', 'del', 'quiere', 'saber', 'cuanto', 'mide', 'venden', 'donde', 'precio', 'tienen', 'el', 'una', 'un', 'hay', 'si', 'es', 'de', 'con', 'para'];
+    const stopWords = ['tienes', 'la', 'del', 'quiere', 'saber', 'cuanto', 'mide', 'venden', 'donde', 'precio', 'tienen', 'el', 'una', 'un', 'hay', 'si', 'es', 'de', 'con', 'para', 'busco', 'alguna', 'algun'];
     
     const palabras = txtNormal.split(' ')
         .filter(p => p.length > 2 && !stopWords.includes(p));
         
     if (palabras.length === 0) return null;
 
+    // ESTRATEGIA 1: Búsqueda Estricta (Todas las palabras deben coincidir)
     let query = "SELECT producto, descripcion, tipo FROM tab_productos WHERE ";
     let conditions = palabras.map(() => "descripcion LIKE ?").join(" AND ");
     let params = palabras.map(p => `%${p}%`);
-
+    
+    console.log(`🔍 Intento 1 (Estricto): ${conditions} con ${params}`);
     try {
         const [rows] = await pool.execute(query + conditions + " LIMIT 5", params);
-        return rows.length > 0 ? rows : null;
-    } catch (e) {
-        console.log("Error SQL Producto:", e);
-        return null;
+        if (rows.length > 0) return rows;
+    } catch (e) { console.log("Error SQL 1:", e); }
+
+    // ESTRATEGIA 2: Búsqueda Flexible (Solo las 2 palabras más importantes)
+    if (palabras.length > 2) {
+        const palabrasImportantes = palabras.slice(0, 2);
+        let conditionsFlex = palabrasImportantes.map(() => "descripcion LIKE ?").join(" AND ");
+        let paramsFlex = palabrasImportantes.map(p => `%${p}%`);
+        
+        console.log(`🔍 Intento 2 (Flexible): ${conditionsFlex} con ${paramsFlex}`);
+        try {
+            const [rows] = await pool.execute(query + conditionsFlex + " LIMIT 5", paramsFlex);
+            if (rows.length > 0) return rows;
+        } catch (e) { console.log("Error SQL 2:", e); }
     }
+
+    // ESTRATEGIA 3: Búsqueda Global (La frase completa)
+    console.log(`🔍 Intento 3 (Global): LIKE %${txtNormal}%`);
+    try {
+        const [rows] = await pool.execute("SELECT producto, descripcion, tipo FROM tab_productos WHERE descripcion LIKE ? LIMIT 5", [`%${txtNormal}%`]);
+        if (rows.length > 0) return rows;
+    } catch (e) { console.log("Error SQL 3:", e); }
+
+    return null;
 }
 
 async function obtenerDetalleFacturas(id_cliente, id_vendedor = null) {
@@ -246,8 +267,6 @@ async function startBot() {
         if (!rawText) return;
 
         const text = normalizar(rawText);
-        
-        // CORRECCIÓN RIF: Solo es RIF si el mensaje completo son solo números
         const esRIFPuro = /^\d+$/.test(rawText.replace(/\s/g, '')) && rawText.length >= 6;
 
         await guardarMensaje(from, 'user', rawText);
@@ -255,8 +274,7 @@ async function startBot() {
         const sesion = await getSesion(from);
         if (sesion && sesion.modo === 'humano' && !isAdmin) return;
 
-        // --- 1. LÓGICA DE PRODUCTOS (PRIORIDAD ABSOLUTA) ---
-        // Intentamos buscar en la DB siempre que no sea un RIF puro o un comando de menú
+        // --- 1. LÓGICA DE PRODUCTOS (PRIORIDAD MÁXIMA) ---
         if (!esRIFPuro && text !== 'menu' && text !== 'hola') {
             try {
                 const prods = await buscarProductoPorTexto(rawText);
@@ -264,11 +282,11 @@ async function startBot() {
                     const inst = fs.readFileSync('./instrucciones.txt', 'utf8');
                     const historial = await obtenerHistorial(from);
                     
-                    let dataProductos = "\n\nDATOS REALES DE LA BASE DE DATOS:\n";
+                    let dataProductos = "\n\nDATOS REALES DE STOCK:\n";
                     prods.forEach(p => {
                         dataProductos += `CÓDIGO: ${p.producto} | TIPO: ${p.tipo} | DESCRIPCIÓN: ${p.descripcion} | LINK: https://one4cars.com/producto_general.php?cod=${p.producto}&tipo=${encodeURIComponent(p.tipo)}\n`;
                     });
-                    dataProductos += `\nINSTRUCCIÓN: El cliente pregunta por "${rawText}". Usa la DESCRIPCIÓN para responder si es lisa, acanalada o cuánto mide (ej: 70x26x17). SIEMPRE entrega el LINK al final.`;
+                    dataProductos += `\nINSTRUCCIÓN: El cliente pregunta "${rawText}". Usa la DESCRIPCIÓN para responder si es lisa, acanalada o cuánto mide. SIEMPRE entrega el LINK al final.`;
 
                     const prompt = `INSTRUCCIONES:\n${inst}\n\nCONTEXTO:\nDólar BCV: ${dolarInfo.bcv} | Paralelo: ${dolarInfo.paralelo}\nUsuario: ${pushName}${dataProductos}\n\nHISTORIAL:\n${historial}\n\nMENSAJE: ${rawText}`;
                     
