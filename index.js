@@ -57,9 +57,14 @@ function normalizar(texto) {
         .trim();
 }
 
-// Función para limpiar RIFs (Quita guiones, puntos y pone la letra en Mayúscula)
+// Limpia el RIF quitando guiones, puntos y espacios
 function limpiarRIF(texto) {
     return texto.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+}
+
+// Extrae solo los números de un RIF (por si en la DB está sin la letra)
+function soloNumerosRIF(texto) {
+    return texto.replace(/\D/g, '');
 }
 
 async function safeSendMessage(jid, content) {
@@ -149,7 +154,12 @@ async function guardarUsuario(jid, usuario, id_int) {
 }
 
 async function buscarCliente(rifLimpio) {
-    const [r] = await pool.execute("SELECT id_cliente, nombres, celular, cedula, direccion, zona FROM tab_clientes WHERE clave = ? OR clave LIKE ? LIMIT 1", [rifLimpio, `%${rifLimpio}%`]);
+    // Intentamos buscar con el RIF tal cual (con letra) y también solo con números
+    const soloNum = soloNumerosRIF(rifLimpio);
+    const [r] = await pool.execute(
+        "SELECT id_cliente, nombres, celular, cedula, direccion, zona FROM tab_clientes WHERE clave = ? OR clave = ? OR clave LIKE ? LIMIT 1", 
+        [rifLimpio, soloNum, `%${rifLimpio}%`]
+    );
     return r[0] || null;
 }
 
@@ -278,7 +288,6 @@ async function startBot() {
             const rifLimpio = limpiarRIF(rawText);
             const c = await buscarCliente(rifLimpio);
             if (c) {
-                // Vinculamos el usuario automáticamente si no lo estaba
                 await guardarUsuario(from, rifLimpio, c.id_cliente);
                 
                 const facturas = await obtenerDetalleFacturas(c.id_cliente);
@@ -293,7 +302,10 @@ async function startBot() {
                         totalP += monto;
                         const fReg = new Date(f.fecha_reg).toISOString().split('T')[0];
                         const params = `id_factura=${f.id_factura}&nro_factura=${f.nro_factura}&fecha_reg=${fReg}&total=${f.total}&abono_factura=${f.abono_factura}&nombres=${encodeURIComponent(f.nombres.trim())}&nombre=${encodeURIComponent(f.nombre_vendedor.trim())}&direccion=${encodeURIComponent(f.direccion.trim())}&cedula=${f.cedula.trim()}&celular=${encodeURIComponent(f.celular.trim())}&telefono=${encodeURIComponent(f.telefono.trim())}&id_cliente=${f.id_cliente}&zona=${encodeURIComponent(f.zona.trim())}&descuento=${f.descuento}&total_desc=${f.total_desc}`;
-                        list += `🔸 *#${f.nro_factura}* | $${monto.toFixed(2)}\n📄 PDF: https://one4cars.com/sevencorp/factura_full_reporte_web.php?${params}\n\n`;
+                        
+                        list += `🔸 *#${f.nro_factura}* | $${monto.toFixed(2)}\n`;
+                        list += `📄 PDF: https://one4cars.com/sevencorp/factura_full_reporte_web.php?${params}\n`;
+                        list += `✍️ Firmada: https://www.one4cars.com/uploads/notas/${f.nro_factura}.jpg\n\n`;
                     });
                     list += `💰 *TOTAL A PAGAR: $${totalP.toFixed(2)}*`;
                 }
