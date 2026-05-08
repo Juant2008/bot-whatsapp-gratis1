@@ -16,7 +16,7 @@ const marketingModulo = require('./marketing');
 const PORT = process.env.PORT || 10000;
 
 // LISTA DE ADMINISTRADORES (Los 3 IDs autorizados)
-const ADMIN_IDS = ["228621243408492", "97899534934200", "250370957778958"];
+const ADMIN_IDS = ["228621243408492", "97899534934200", "584142531553", "250370957778958"];
 
 const pool = mysql.createPool({
     host: 'one4cars.com',
