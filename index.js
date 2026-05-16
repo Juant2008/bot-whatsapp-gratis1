@@ -323,43 +323,56 @@ async function checkFacturasVencidas() {
         const facturas = await notificador.obtenerFacturasVencidas();
         const enviados = await notificador.obtenerRecordatoriosEnviados();
         let cont = 0;
+        const vendedoresMap = {};
 
         for (const f of facturas) {
             const dias = f.dias_vencida;
             const nivel = obtenerNivelRecordatorio(dias);
             if (!nivel) continue;
 
-            const yaEnviado = enviados[f.id_factura] && enviados[f.id_factura].includes(nivel);
-            if (yaEnviado) continue;
-
             const monto = (parseFloat(f.total) - parseFloat(f.abono_factura || 0)) / (parseFloat(f.porcentaje) || 1);
             if (monto <= 0) continue;
 
             const fecha = new Date(f.fecha_reg).toISOString().split('T')[0];
 
-            // Enviar al cliente
-            const jid = formatWhatsApp(f.celular);
-            if (jid) {
-                const msg = obtenerTonoMensaje(nivel, f, monto, fecha);
-                await safeSendMessage(jid, { text: msg });
-            }
-
-            // Enviar al vendedor
-            if (f.celular_vendedor) {
-                const jidV = formatWhatsApp(f.celular_vendedor);
-                if (jidV) {
-                    const msgV = `📢 *RECORDATORIO A SU CLIENTE*\n\nVendedor: *${f.vendedor_nombre || 'N/A'}*\nCliente: *${f.nombres}*\nFactura: *N° ${f.nro_factura}*\nSaldo: *$${monto.toFixed(2)}*\nDías vencida: *${dias}*`;
-                    await safeSendMessage(jidV, { text: msgV });
+            // CLIENTE: solo una vez por nivel (30, 40, 50, 60)
+            const yaEnviado = enviados[f.id_factura] && enviados[f.id_factura].includes(nivel);
+            if (!yaEnviado) {
+                const jid = formatWhatsApp(f.celular);
+                if (jid) {
+                    const msg = obtenerTonoMensaje(nivel, f, monto, fecha);
+                    await safeSendMessage(jid, { text: msg });
                 }
+                await notificador.marcarRecordatorio(f.id_factura, nivel);
+                cont++;
+                await sleep(1000);
             }
 
-            await notificador.marcarRecordatorio(f.id_factura, nivel);
-            cont++;
+            // VENDEDOR: agrupar para enviar resumen consolidado cada 24h
+            if (f.celular_vendedor) {
+                const key = f.celular_vendedor.toString().replace(/\D/g, '');
+                if (!vendedoresMap[key]) {
+                    vendedoresMap[key] = {
+                        nombre: f.vendedor_nombre || 'Vendedor',
+                        jid: formatWhatsApp(f.celular_vendedor),
+                        facturas: []
+                    };
+                }
+                vendedoresMap[key].facturas.push(`🔹 *N° ${f.nro_factura}* - ${f.nombres} - $${monto.toFixed(2)} (${dias} días)`);
+            }
+        }
+
+        // Enviar resumen consolidado a cada vendedor
+        for (const key of Object.keys(vendedoresMap)) {
+            const v = vendedoresMap[key];
+            if (!v.jid) continue;
+            const msgV = `📢 *RESUMEN DE CLIENTES VENCIDOS*\n\nVendedor: *${v.nombre}*\n\n${v.facturas.join('\n')}\n\nLe recordamos la importancia de gestionar estos cobros para mantener la rotación de productos.`;
+            await safeSendMessage(v.jid, { text: msgV });
             await sleep(1000);
         }
 
         if (cont > 0) {
-            console.log(`[RECORDATORIO] ${cont} recordatorio(s) enviado(s).`);
+            console.log(`[RECORDATORIO] ${cont} cliente(s) notificado(s) + ${Object.keys(vendedoresMap).length} resumen(es) a vendedores.`);
         }
     } catch (e) {
         console.log("[RECORDATORIO] Error:", e.message);
@@ -392,7 +405,7 @@ async function startBot() {
             console.log("🚀 BOT MASTER ONLINE");
             if (!notificadorInterval) {
                 notificadorInterval = setInterval(checkNuevasFacturas, 45000);
-                setInterval(checkFacturasVencidas, 21600000);
+                setInterval(checkFacturasVencidas, 86400000);
             }
         }
         if (connection === 'close') {
@@ -704,11 +717,4 @@ const server = http.createServer(async (req, res) => {
             </div>
         </body></html>`);
     }
-});
-
-server.listen(PORT, '0.0.0.0', async () => {
-    await initDB();
-    startBot();
-    actualizarDolar();
-    setInterval(actualizarDolar, 3600000);
 });
