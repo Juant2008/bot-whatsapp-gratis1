@@ -493,7 +493,8 @@ async function startBot() {
             if (textMe === '!bot') {
                 await setModo(from, 'bot');
                 await safeSendMessage(from, { text: "🤖 Bot reactivado para este chat." });
-            } else if (!isAdmin) {
+            } else {
+                // CORRECCIÓN: Cualquier mensaje enviado por el dueño pone el chat en modo humano inmediatamente
                 await setModo(from, 'humano');
             }
             return;
@@ -598,9 +599,12 @@ async function startBot() {
             return await safeSendMessage(from, { text: listado });
         }
 
-        // --- 6. FALLBACK (SÓLO SI NO ES UNA RESPUESTA CORTA) ---
+        // --- 6. FALLBACK (SÓLO SI NO ES UNA RESPUESTA CORTA O CONVERSACIÓN LARGA) ---
         const conversationalShorts = ['si', 'no', 'ok', 'vale', 'gracias', 'ya', 'entendido', 'está bien', 'bueno', 'dale', 'está ok', 'está bien', 'claro'];
-        if (conversationalShorts.includes(text)) return; // No responder a confirmaciones simples
+        if (conversationalShorts.includes(text)) return; 
+
+        // Si el mensaje es muy largo (> 120 caracteres), asumimos que es una conversación humana y el bot NO interviene.
+        if (rawText.length > 120) return;
 
         await safeSendMessage(from, { text: "Lo siento, no logré entender tu solicitud. 😕 ¿Podrías darme más detalles o escribir *menu* para ver nuestras opciones?" });
         } catch (e) { console.log("[MSG] Error en handler de mensajes:", e.message); }
