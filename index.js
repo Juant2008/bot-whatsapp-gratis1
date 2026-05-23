@@ -224,12 +224,10 @@ async function buscarProductoPorTexto(texto) {
 
     if (palabrasBase.length === 0) return null;
 
-    // --- FILTRO DE PALABRAS DE POSICIÓN (SOLO COINCIDENCIAS) ---
     const positionalWords = ['superior', 'sup', 'inferior', 'inf', 'interno', 'int', 'externo', 'ext', 'derecha', 'der', 'izquierda', 'izq'];
     const isOnlyPositional = palabrasBase.every(p => positionalWords.includes(p));
     if (isOnlyPositional) return null;
 
-    // --- Expansión singular/plural ---
     const expandirFormas = (pal) => {
         const f = [pal];
         if (pal.endsWith('es') && pal.length > 4) f.push(pal.slice(0, -2));
@@ -244,19 +242,26 @@ async function buscarProductoPorTexto(texto) {
     const stockCondition = "(cantidad_existencia + cantidad_existencia_almacen > 0)";
     const queryBase = `SELECT producto, descripcion, tipo, precio_final FROM tab_productos WHERE ${stockCondition} AND `;
 
-    // 1. AND con las palabras base exactas
-    const allAnd = palabrasBase.map(() => "descripcion LIKE ?").join(" AND ");
-    try {
-        const [rows] = await pool.execute(queryBase + allAnd + " LIMIT 8", palabrasBase.map(p => `%${p}%`));
-        if (rows.length > 0) return rows;
-    } catch (e) {}
+    // --- 1. AND INTELIGENTE (Filtro Estricto con Plurales/Singulares) ---
+    // Para cada palabra, creamos un grupo (descripcion LIKE %singular% OR descripcion LIKE %plural%)
+    const andGroups = palabrasBase.map(p => {
+        const formas = expandirFormas(p);
+        const conditions = formas.map(f => `descripcion LIKE ?`).join(" OR ");
+        return `(${conditions})`;
+    }).join(" AND ");
 
-    // 2. OR con todas las formas (singular/plural) ordenado por relevancia
+    const andParams = palabrasBase.flatMap(p => expandirFormas(p).map(f => `%${f}%`));
+
+    try {
+        const [rowsAnd] = await pool.execute(queryBase + andGroups + " LIMIT 8", andParams);
+        if (rowsAnd.length > 0) return rowsAnd; // Si encuentra coincidencias exactas (aunque sean plurales), retorna y no sigue
+    } catch (e) { console.log("Error en AND Inteligente:", e); }
+
+    // --- 2. OR CON RELEVANCIA (Solo si el AND no encontró nada) ---
     const expandedTerms = [...new Set(palabrasBase.flatMap(expandirFormas))];
     const orConditions = expandedTerms.map(() => "descripcion LIKE ?");
     const orParams = expandedTerms.map(p => `%${p}%`);
 
-    // Relevancia = cuantas palabras BASE distintas tienen al menos una forma coincidiendo
     const relevanceParts = palabrasBase.map(p => {
         const formas = expandirFormas(p);
         const cases = formas.map(f => `descripcion LIKE '%${f.replace(/[^a-z]/g, '')}%'`);
@@ -266,16 +271,15 @@ async function buscarProductoPorTexto(texto) {
     const minRelevance = palabrasBase.length >= 2 ? 2 : 1;
 
     try {
-        const [rows] = await pool.execute(
+        const [rowsOr] = await pool.execute(
             queryBase + orConditions.join(" OR ") + ` HAVING (${relevanceSQL}) >= ? ORDER BY ${relevanceSQL} DESC LIMIT 8`,
             [...orParams, minRelevance]
         );
-        if (rows.length > 0) return rows;
-    } catch (e) {}
+        if (rowsOr.length > 0) return rowsOr;
+    } catch (e) { console.log("Error en OR:", e); }
 
     return null;
 }
-
 async function obtenerDetalleFacturas(id_cliente, id_vendedor = null) {
     let query = `
         SELECT f.id_factura, f.nro_factura, f.total, f.abono_factura, f.fecha_reg, f.porcentaje, f.descuento, f.total_desc,
