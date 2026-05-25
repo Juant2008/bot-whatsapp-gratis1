@@ -179,34 +179,10 @@ async function guardarUsuario(jid, usuario, id_int) {
     `, [jid, usuario, id_int]);
 }
 
-async function buscarCliente(rifLimpio) {
-    const soloNum = soloNumerosRIF(rifLimpio);
-    const [r] = await pool.execute(
-        "SELECT id_cliente, nombres, celular, cedula, direccion, zona FROM tab_clientes WHERE clave = ? OR clave = ? OR clave LIKE ? LIMIT 1", 
-        [rifLimpio, soloNum, `%${rifLimpio}%`]
-    );
-    return r[0] || null;
-}
-
 async function buscarProductoPorTexto(texto) {
     const txtNormal = normalizar(texto);
     
-    // 1. Definiciones estrictas
-    const positionalWords = {
-        'delantera': 'trasera',
-        'delanteras': 'trasera',
-        'trasera': 'delantera',
-        'traseras': 'delantera',
-        'superior': 'inferior',
-        'inferior': 'superior',
-        'interno': 'externo',
-        'externo': 'interno',
-        'derecha': 'izquierda',
-        'izquierda': 'derecha'
-    };
-
-    const partWords = ['rolinera', 'rodamiento', 'estopera', 'sello', 'amortiguador', 'amort', 'pastilla', 'freno', 'disco', 'bomba', 'correa', 'filtro'];
-    
+    // 1. Diccionario de Sinónimos (Para que "rolinera" encuentre "rodamiento" y viceversa)
     const sinonimos = {
         'rolinera': ['rodamiento', 'rolinera'],
         'rolineras': ['rodamiento', 'rolinera'],
@@ -250,82 +226,58 @@ async function buscarProductoPorTexto(texto) {
 
     if (palabrasBase.length === 0) return null;
 
-    let modelWords = [];
-    let partWordsFound = [];
-    let positionWordsFound = [];
-    let oppositeWords = [];
-
-    // 2. Clasificación de la búsqueda
-    palabrasBase.forEach(pal => {
-        if (positionalWords[pal]) {
-            positionWordsFound.push(pal);
-            oppositeWords.push(positionalWords[pal]);
-        } else if (partWords.includes(pal) || sinonimos[pal]) {
-            partWordsFound.push(pal);
-        } else {
-            modelWords.push(pal); // Todo lo demás se trata como Modelo (Chevrolet, Toyota, etc.)
+    const expandirFormas = (pal) => {
+        if (sinonimos[pal]) return sinonimos[pal];
+        const f = [pal];
+        if (pal.endsWith('es') && pal.length > 4) f.push(pal.slice(0, -2));
+        if (pal.endsWith('s') && pal.length > 3 && !pal.endsWith('es')) f.push(pal.slice(0, -1));
+        if (!pal.endsWith('s')) {
+            f.push(pal + 's');
+            if (pal.endsWith('z')) f.push(pal.slice(0, -1) + 'ces');
         }
-    });
+        return [...new Set(f)];
+    };
 
     const stockCondition = "(cantidad_existencia + cantidad_existencia_almacen > 0)";
-    let whereClause = stockCondition;
+    
+    // --- CONSTRUCCIÓN DEL SCORE ---
+    let scoreSQL = "0";
     let queryParams = [];
 
-    // 3. FILTRO ESTRICTO DE MODELO: Si hay modelos, el producto DEBE contener al menos uno
-    if (modelWords.length > 0) {
-        const modelConditions = [];
-        modelWords.forEach(pal => {
-            modelConditions.push("descripcion LIKE ?");
-            queryParams.push(`%${pal}%`);
-        });
-        whereClause += ` AND (${modelConditions.join(" OR ")})`;
-    }
-
-    // 4. FILTRO ESTRICTO DE PIEZA: Si hay piezas, el producto DEBE contener al menos una o su sinónimo
-    if (partWordsFound.length > 0) {
-        const partConditions = [];
-        partWordsFound.forEach(pal => {
-            const formas = sinonimos[pal] || [pal];
-            formas.forEach(f => {
-                partConditions.push("descripcion LIKE ?");
-                queryParams.push(`%${f}%`);
-            });
-        });
-        whereClause += ` AND (${partConditions.join(" OR ")})`;
-    }
-
-    // 5. FILTRO DE EXCLUSIÓN DE POSICIÓN: Si pide "Delantera", NO puede decir "Trasera"
-    if (oppositeWords.length > 0) {
-        const oppositeConditions = [];
-        oppositeWords.forEach(opp => {
-            oppositeConditions.push("descripcion NOT LIKE ?");
-            queryParams.push(`%${opp}%`);
-        });
-        whereClause += ` AND (${oppositeConditions.join(" AND ")})`;
-    }
+    palabrasBase.forEach(pal => {
+        const formas = expandirFormas(pal);
+        const conditions = formas.map(() => "descripcion LIKE ?").join(" OR ");
+        scoreSQL += ` + (CASE WHEN ${conditions} THEN 1 ELSE 0 END)`;
+        formas.forEach(f => queryParams.push(`%${f}%`));
+    });
 
     try {
-        // Usamos un sistema de relevancia simple para ordenar, pero el WHERE ya filtró la basura
-        let scoreSQL = "0";
-        let scoreParams = [];
-        palabrasBase.forEach(pal => {
-            scoreSQL += ` + (CASE WHEN descripcion LIKE ? THEN 1 ELSE 0 END)`;
-            scoreParams.push(`%${pal}%`);
-        });
-
+        // Traemos los productos ordenados por el que más coincidencias tiene
         const sql = `
             SELECT producto, descripcion, tipo, precio_final, (${scoreSQL}) as relevancia 
             FROM tab_productos 
-            WHERE ${whereClause} 
+            WHERE ${stockCondition} 
+            HAVING relevancia > 0 
             ORDER BY relevancia DESC 
-            LIMIT 8`;
+            LIMIT 50`; // Traemos un grupo grande para filtrar en JS
             
-        // Importante: Los parámetros del SELECT (score) van primero que los del WHERE
-        const [rows] = await pool.execute(sql, [...scoreParams, ...queryParams]);
+        const [rows] = await pool.execute(sql, queryParams);
         
-        if (rows.length > 0) return rows;
+        if (rows.length === 0) return null;
+
+        // --- LÓGICA DE PRIORIDAD DINÁMICA ---
+        // 1. Identificamos cuál es el puntaje más alto obtenido por cualquier producto
+        const maxRelevancia = rows[0].relevancia; 
+
+        // 2. FILTRO CRÍTICO: Solo mantenemos los productos que tengan ese puntaje máximo.
+        // Si el mejor producto coincide en 4 palabras, eliminamos todos los que coincidan en 3, 2 o 1.
+        const resultadosFiltrados = rows.filter(row => row.relevancia === maxRelevancia);
+
+        // 3. Retornamos solo los mejores (máximo 8)
+        return resultadosFiltrados.slice(0, 8);
+
     } catch (e) {
-        console.log("Error en búsqueda estricta:", e.message);
+        console.log("Error en búsqueda de prioridades:", e.message);
     }
 
     return null;
