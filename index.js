@@ -63,11 +63,11 @@ const MENU_INTENTIONS = {
         response: `1️⃣ *Medios de pago:* https://www.one4cars.com/medios_de_pago.php/`
     },
     '2': {
-        keywords: ['estado de cuenta', 'cuanto debo', 'mi saldo', 'facturas pendientes', 'mi deuda', 'listado de facturas', 'cuentas por cobrar'],
+        keywords: ['estado de cuenta', 'cuanto debo', 'listado de facturas pendiente', 'mi saldo', 'facturas pendientes', 'mi deuda', 'listado de facturas', 'cuentas por cobrar'],
         response: `2️⃣ *Estado de cuenta:* https://www.one4cars.com/estado_de_cuenta.php/`
     },
     '3': {
-        keywords: ['lista de precios', 'catalogo de precios', 'cuanto cuestan', 'ver precios'],
+        keywords: ['lista de precios', 'listado de precios', 'catalogo de precios', 'cuanto cuestan', 'ver precios'],
         response: `3️⃣ *Lista de precios:* https://www.one4cars.com/lista_de_precios.php/`
     },
     '4': {
@@ -83,7 +83,7 @@ const MENU_INTENTIONS = {
         response: `6️⃣ *Afiliar cliente:* https://www.one4cars.com/afiliar_clientes.php/`
     },
     '7': {
-        keywords: ['consulta de productos', 'buscar en inventario', 'ver disponibilidad', 'buscar repuesto'],
+        keywords: ['consulta de productos', 'buscar en inventario', 'ver disponibilidad',  'saber de sus productos', 'buscar repuesto'],
         response: `7️⃣ *Consulta de productos:* https://www.one4cars.com/consulta_productos.php/`
     },
     '8': {
