@@ -656,9 +656,18 @@ async function startBot() {
          // ============================================================
             // NUEVO: LÓGICA DE PAGO / ABONO (COLOCAR AQUÍ)
             // ============================================================
-            if (text === 'pago fact' || text === 'abono' || text.includes('envié el pago') || text.includes('adjunto pago')) {
+            if (text === 'pago fact' || text === 'abono'  || text.includes('pago') || text.includes('envié el pago') || text.includes('adjunto pago')) {
                 const nombreUsuario = vendedor ? vendedor.nombre : pushName;
                 const saludoCordial = `¡Hola *${nombreUsuario}*! Gracias por su mensaje. 😊\n\nRecibido tu mensaje, administración validará su pago a la brevedad.\n\n${MENU_TEXT}`;
+                return await safeSendMessage(from, { text: saludoCordial });
+            }
+
+                     // ============================================================
+            // NUEVO: (Factura Fiscal)
+            // ============================================================
+            if (text === 'pago fact' || text === 'factura fiscal'  || text.includes('factura con iva') || ) {
+                const nombreUsuario = vendedor ? vendedor.nombre : pushName;
+                const saludoCordial = `¡Hola *${nombreUsuario}*! Gracias por su mensaje. 😊\n\nLa Factura Fiscalk sera realizada de acuerdo con su solicitud el dia que tenga disponibilidad de hacer el pago.\n\n${MENU_TEXT}`;
                 return await safeSendMessage(from, { text: saludoCordial });
             }
             // --- 3. LÓGICA DE DESPACHOS Y TIEMPOS ---
