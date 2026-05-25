@@ -263,7 +263,7 @@ async function buscarProductoPorTexto(texto) {
         } else if (partWords.includes(pal) || sinonimos[pal]) {
             partWordsFound.push(pal);
         } else {
-            modelWords.push(pal); // Todo lo demás se trata como Modelo (Fiesta, Toyota, etc.)
+            modelWords.push(pal); // Todo lo demás se trata como Modelo (Chevrolet, Toyota, etc.)
         }
     });
 
