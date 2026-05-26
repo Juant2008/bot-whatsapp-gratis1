@@ -315,6 +315,8 @@ async function buscarProductoPorTexto(texto) {
 
     const stockCondition = "(cantidad_existencia + cantidad_existencia_almacen > 0)";
     
+    // --- OPTIMIZACIÓN 1: BÚSQUEDA INTERSECCIÓN ESTRICTA (AND) ---
+    // Obliga a que los artículos devueltos contengan TODAS las palabras clave principales.
     let whereClause = "";
     let queryParams = [];
 
@@ -327,16 +329,18 @@ async function buscarProductoPorTexto(texto) {
     });
 
     try {
-        const sql = `SELECT producto, descripcion, tipo, precio_final, (cantidad_existencia + cantidad_existencia_almacen) as stock FROM tab_productos WHERE ${stockCondition} AND ${whereClause} LIMIT 8`;
+        const sql = `SELECT producto, descripcion, tipo, precio_final, (cantidad_existencia + cantidad_existencia_almacen) as stock FROM tab_productos WHERE ${whereClause} LIMIT 8`;
         const [rows] = await pool.execute(sql, queryParams);
         if (rows.length > 0) return rows;
     } catch (e) {
-        console.log("Error Intento 1:", e.message);
+        console.log("Error Intento 1 (Strict AND):", e.message);
     }
 
-    let minRelevance = 1;
-    if (palabrasBase.length >= 3) minRelevance = 2; 
-    if (palabrasBase.length >= 5) minRelevance = 3;
+    // --- OPTIMIZACIÓN 2: CORRECCIÓN DEL FILTRO DE RELEVANCIA EN CAÍDA ---
+    // Si la búsqueda estricta falla, se evalúa relevancia matemática, pero restringiendo a coincidencias altas.
+    let minRelevance = palabrasBase.length; 
+    if (palabrasBase.length >= 3) minRelevance = palabrasBase.length - 1; 
+    if (palabrasBase.length >= 5) minRelevance = palabrasBase.length - 2;
 
     const expandedTerms = [...new Set(palabrasBase.flatMap(expandirFormas))];
     const orConditions = expandedTerms.map(() => "descripcion LIKE ?");
@@ -344,7 +348,7 @@ async function buscarProductoPorTexto(texto) {
 
     const relevanceParts = palabrasBase.map(p => {
         const formas = expandirFormas(p);
-        const cases = formas.map(f => `descripcion LIKE '%${f.replace(/[^a-z]/g, '')}%'`);
+        const cases = formas.map(f => `descripcion LIKE '%${f.replace(/[^a-z0-9]/g, '')}%'`);
         return `(CASE WHEN ${cases.join(' OR ')} THEN 1 ELSE 0 END)`;
     });
     const relevanceSQL = relevanceParts.join(' + ');
@@ -353,15 +357,15 @@ async function buscarProductoPorTexto(texto) {
         const sqlRelevancia = `
             SELECT producto, descripcion, tipo, precio_final, (cantidad_existencia + cantidad_existencia_almacen) as stock 
             FROM tab_productos 
-            WHERE ${stockCondition} AND ${orConditions.join(" OR ")} 
+            WHERE (${orConditions.join(" OR ")}) 
             HAVING (${relevanceSQL}) >= ? 
-            ORDER BY ${relevanceSQL} DESC 
+            ORDER BY ${relevanceSQL} DESC, ${stockCondition} DESC 
             LIMIT 8`;
             
         const [rows] = await pool.execute(sqlRelevancia, [...orParams, minRelevance]);
         if (rows.length > 0) return rows;
     } catch (e) {
-        console.log("Error Intento 2:", e.message);
+        console.log("Error Intento 2 (Relevance Fallback):", e.message);
     }
 
     return null;
@@ -675,7 +679,7 @@ async function startBot() {
             // --- NUEVO: LÓGICA DE PAGO / ABONO ---
             if (text === 'pago fact' || text === 'abono'  || text.includes('pago') || text.includes('al señor oscar') || text.includes('envié el pago') || text.includes('adjunto pago')) {
                 const nombreUsuario = vendedor ? vendedor.nombre : pushName;
-                const saludoCordial = `¡Hola *${nombreUsuario}*! Gracias por su mensaje. 😊\n\nRecibido tu mensaje, administración validará su pago a la brevedad.\n\n${MENU_TEXT}`;
+                const saludoCordial = `¡Hola *${nombreUsuario}*! Gracias por su mensaje. 😊\n\nRecibido tu mensaje, administración validará su pago a la mayor brevedad.\n\n${MENU_TEXT}`;
                 return await safeSendMessage(from, { text: saludoCordial });
             }
 
@@ -692,12 +696,12 @@ async function startBot() {
                 text.includes("cuando me llega") || 
                 text.includes("tiempo de entrega") || 
                 text.includes("cuanto tarda el envio")) {
-                return await safeSendMessage(from, { text: "Saludos estimado cliente, su pedido está disponible en un lapso no mayor de 24 horas" });
+                return await safeSendMessage(from, { text: "Saludos estimado cliente, su pedido está disponible en un lapso no mayor de 24 hours" });
             }
 
             // --- NUEVO: ENTRADAS DE SALUDOS EXTENDIDOS Y CORTESÍA ---
             if (text === 'hola buenos dias' || text === 'buenos dias' || text === 'como estas' || text === 'como estas tu' || text === 'hola como estas') {
-                const saludoCalido = `¡Hola! Gusto en saludarlo estimado. Buenos días también para usted. ¿Cómo está? Aca estamos, gracias por preguntar. Estoy atento para lo que necesite. 😊\n\n${MENU_TEXT}`;
+                const saludoCalido = `¡Hola! Gusto en saludarlo. Buenos días también para usted. ¿Cómo está usted? Por aquí muy bien, gracias por preguntar. Estoy atento para lo que necesite. 😊\n\n${MENU_TEXT}`;
                 return await safeSendMessage(from, { text: saludoCalido });
             }
 
@@ -821,7 +825,7 @@ async function startBot() {
 
             // --- 6. SALUDO Y MENÚ ---
             if (text === 'menu' || text === 'hola' || text === 'buen dia' || text === 'buenos dias') {
-                const nombreUsuario = seller ? seller.nombre : pushName;
+                const nombreUsuario = vendedor ? vendedor.nombre : pushName;
                 const saludoCordial = `¡Hola *${nombreUsuario}*! Es un gusto saludarte. 😊\n\n¿En qué podemos ayudarte hoy? Por favor, indícanos qué servicio necesitas o consulta nuestro menú a continuación:\n\n${MENU_TEXT}`;
                 return await safeSendMessage(from, { text: saludoCordial });
             }
