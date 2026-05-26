@@ -697,29 +697,35 @@ async function startBot() {
                 return await safeSendMessage(from, { text: "Saludos estimado cliente, su pedido esta disponible en un lapso no mayor de 24 horas" });
             }
 
-// --- 4. LÓGICA DE PRODUCTOS (CORREGIDA) ---
-            if (text !== 'menu' && !['hola', 'buen dia', 'buenos dias'].includes(text)) {
+// --- 4. LÓGICA DE PRODUCTOS (MEJORADA) ---
+            // Nueva lógica: EXTRAEMOS posibles códigos antes de descartar la oración
+            let codigoABuscar = "";
+            const palabras = rawText.split(/\s+/);
+            
+            // Intentamos detectar códigos comunes (ej: MF283, 513113)
+            // Busca palabras que contengan letras y números o solo números largos
+            const posibleCodigo = palabras.find(p => /^[A-Z0-9]{3,}$/i.test(p.replace(/[.,?]/g, '')));
+            
+            if (posibleCodigo) {
+                codigoABuscar = posibleCodigo.replace(/[.,?]/g, '');
+            }
+
+            if (codigoABuscar !== "" || (text !== 'menu' && !['hola', 'buen dia', 'buenos dias', 'buenas tardes'].includes(text))) {
                 try {
-                    let prods = await buscarProductoPorCodigo(rawText);
+                    // Usamos el código extraído si existe, sino, buscamos por texto normal
+                    let prods = await buscarProductoPorCodigo(codigoABuscar || rawText);
                     
-                    if (!prods) {
-                        prods = await buscarProductoPorTexto(rawText);
+                    if (!prods || prods.length === 0) {
+                        prods = await buscarProductoPorTexto(codigoABuscar || rawText);
                     }
 
-                    if (prods) {
-                        // Primero, verificamos si hay algo con stock
+                    if (prods && prods.length > 0) {
                         const conStock = prods.filter(p => parseFloat(p.stock) > 0);
                         const agotados = prods.filter(p => parseFloat(p.stock) <= 0);
 
-                        // Mensaje de saludo
-                        const saludos = [
-                            "Saludos estimado, gracias por tu consulta. Esto es lo que encontré: 👇",
-                            "¡Hola! He buscado en nuestro inventario y aquí tienes la información: 👇"
-                        ];
-                        await safeSendMessage(from, { text: saludos[Math.floor(Math.random() * saludos.length)] });
+                        await safeSendMessage(from, { text: "🔍 *Resultados de búsqueda en inventario:* 👇" });
                         await sleep(1000);
 
-                        // 1. Procesar productos con stock
                         for (const p of conStock) {
                             if (!isBotReady()) break; 
                             const precioLimpio = parseFloat(p.precio_final || 0).toFixed(2);
@@ -733,12 +739,10 @@ async function startBot() {
                             await sleep(1500);
                         }
 
-                        // 2. Procesar productos agotados (Avisando que no hay stock pero mostrando los detalles)
                         for (const p of agotados) {
                             if (!isBotReady()) break;
                             const precioLimpio = parseFloat(p.precio_final || 0).toFixed(2);
-                            const msgAgotado = `⚠️ *AVISO: PRODUCTO AGOTADO*\n\n📦 *CÓDIGO: ${p.producto}*\n💰 *Precio: $${precioLimpio}*\n📝 ${p.descripcion}\n🔗 Ficha: https://one4cars.com/producto_general.php?cod=${p.producto}&tipo=${encodeURIComponent(p.tipo)}\n\n_Este producto actualmente no tiene disponibilidad en almacén._`;
-                            
+                            const msgAgotado = `⚠️ *AVISO: PRODUCTO AGOTADO*\n\n📦 *CÓDIGO: ${p.producto}*\n💰 *Precio: $${precioLimpio}*\n📝 ${p.descripcion}\n🔗 Ficha: https://one4cars.com/producto_general.php?cod=${p.producto}&tipo=${encodeURIComponent(p.tipo)}\n\n_Este producto actualmente no tiene disponibilidad._`;
                             const imgUrl = `https://one4cars.com/imagen/${p.producto}.jpg`;
                             try {
                                 await socketBot.sendMessage(from, { image: { url: imgUrl }, caption: msgAgotado });
@@ -747,7 +751,7 @@ async function startBot() {
                             }
                             await sleep(1500);
                         }
-                        return;
+                        return; // Salimos exitosamente tras mostrar productos
                     }
                 } catch (e) { console.log("Error en flujo de productos:", e); }
             }
