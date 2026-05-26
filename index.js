@@ -698,64 +698,68 @@ async function startBot() {
             }
 
 // --- 4. LÓGICA DE PRODUCTOS (MEJORADA) ---
-            // Nueva lógica: EXTRAEMOS posibles códigos antes de descartar la oración
-            let codigoABuscar = "";
-            const palabras = rawText.split(/\s+/);
-            
-            // Intentamos detectar códigos comunes (ej: MF283, 513113)
-            // Busca palabras que contengan letras y números o solo números largos
-            const posibleCodigo = palabras.find(p => /^[A-Z0-9]{3,}$/i.test(p.replace(/[.,?]/g, '')));
-            
-            if (posibleCodigo) {
-                codigoABuscar = posibleCodigo.replace(/[.,?]/g, '');
-            }
+let codigoABuscar = "";
+const palabras = rawText.split(/\s+/);
 
-            if (codigoABuscar !== "" || (text !== 'menu' && !['hola', 'buen dia', 'buenos dias', 'buenas tardes'].includes(text))) {
+// Ajuste: Limpiamos signos de puntuación de cada palabra antes de verificar si es un código
+// Se acepta cualquier palabra que tenga letras y números, o números largos (mínimo 3 caracteres)
+const posibleCodigo = palabras.find(p => {
+    const limpia = p.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()?!]/g, "");
+    return /^[A-Z0-9]{3,}$/i.test(limpia);
+});
+
+if (posibleCodigo) {
+    codigoABuscar = posibleCodigo.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()?!]/g, "");
+}
+
+if (codigoABuscar !== "" || (text !== 'menu' && !['hola', 'buen dia', 'buenos dias', 'buenas tardes'].includes(text))) {
+    try {
+        // Si se encontró un código, buscamos por ese código exacto primero
+        let prods = [];
+        if (codigoABuscar !== "") {
+            prods = await buscarProductoPorCodigo(codigoABuscar);
+        }
+        
+        // Si no se encontró por código o no había código, buscamos por texto normal
+        if (!prods || prods.length === 0) {
+            prods = await buscarProductoPorTexto(codigoABuscar !== "" ? codigoABuscar : rawText);
+        }
+
+        if (prods && prods.length > 0) {
+            const conStock = prods.filter(p => parseFloat(p.stock) > 0);
+            const agotados = prods.filter(p => parseFloat(p.stock) <= 0);
+
+            await safeSendMessage(from, { text: "🔍 *Resultados de búsqueda en inventario:* 👇" });
+            await sleep(1000);
+
+            for (const p of conStock) {
+                if (!isBotReady()) break; 
+                const precioLimpio = parseFloat(p.precio_final || 0).toFixed(2);
+                const caption = `📦 *CÓDIGO: ${p.producto}*\n💰 *Precio Final: $${precioLimpio}*\n📝 ${p.descripcion}\n🔗 Ficha: https://one4cars.com/producto_general.php?cod=${p.producto}&tipo=${encodeURIComponent(p.tipo)}`;
+                const imgUrl = `https://one4cars.com/imagen/${p.producto}.jpg`;
                 try {
-                    // Usamos el código extraído si existe, sino, buscamos por texto normal
-                    let prods = await buscarProductoPorCodigo(codigoABuscar || rawText);
-                    
-                    if (!prods || prods.length === 0) {
-                        prods = await buscarProductoPorTexto(codigoABuscar || rawText);
-                    }
-
-                    if (prods && prods.length > 0) {
-                        const conStock = prods.filter(p => parseFloat(p.stock) > 0);
-                        const agotados = prods.filter(p => parseFloat(p.stock) <= 0);
-
-                        await safeSendMessage(from, { text: "🔍 *Resultados de búsqueda en inventario:* 👇" });
-                        await sleep(1000);
-
-                        for (const p of conStock) {
-                            if (!isBotReady()) break; 
-                            const precioLimpio = parseFloat(p.precio_final || 0).toFixed(2);
-                            const caption = `📦 *CÓDIGO: ${p.producto}*\n💰 *Precio Final: $${precioLimpio}*\n📝 ${p.descripcion}\n🔗 Ficha: https://one4cars.com/producto_general.php?cod=${p.producto}&tipo=${encodeURIComponent(p.tipo)}`;
-                            const imgUrl = `https://one4cars.com/imagen/${p.producto}.jpg`;
-                            try {
-                                await socketBot.sendMessage(from, { image: { url: imgUrl }, caption: caption });
-                            } catch (imgErr) {
-                                await safeSendMessage(from, { text: caption });
-                            }
-                            await sleep(1500);
-                        }
-
-                        for (const p of agotados) {
-                            if (!isBotReady()) break;
-                            const precioLimpio = parseFloat(p.precio_final || 0).toFixed(2);
-                            const msgAgotado = `⚠️ *AVISO: PRODUCTO AGOTADO*\n\n📦 *CÓDIGO: ${p.producto}*\n💰 *Precio: $${precioLimpio}*\n📝 ${p.descripcion}\n🔗 Ficha: https://one4cars.com/producto_general.php?cod=${p.producto}&tipo=${encodeURIComponent(p.tipo)}\n\n_Este producto actualmente no tiene disponibilidad._`;
-                            const imgUrl = `https://one4cars.com/imagen/${p.producto}.jpg`;
-                            try {
-                                await socketBot.sendMessage(from, { image: { url: imgUrl }, caption: msgAgotado });
-                            } catch (imgErr) {
-                                await safeSendMessage(from, { text: msgAgotado });
-                            }
-                            await sleep(1500);
-                        }
-                        return; // Salimos exitosamente tras mostrar productos
-                    }
-                } catch (e) { console.log("Error en flujo de productos:", e); }
+                    await socketBot.sendMessage(from, { image: { url: imgUrl }, caption: caption });
+                } catch (imgErr) {
+                    await safeSendMessage(from, { text: caption });
+                }
+                await sleep(1500);
             }
 
+            for (const p of agotados) {
+                if (!isBotReady()) break;
+                const msgAgotado = `⚠️ *AVISO: PRODUCTO AGOTADO*\n\n📦 *CÓDIGO: ${p.producto}*\n📝 ${p.descripcion}\n\n_Este producto actualmente no tiene disponibilidad._`;
+                const imgUrl = `https://one4cars.com/imagen/${p.producto}.jpg`;
+                try {
+                    await socketBot.sendMessage(from, { image: { url: imgUrl }, caption: msgAgotado });
+                } catch (imgErr) {
+                    await safeSendMessage(from, { text: msgAgotado });
+                }
+                await sleep(1500);
+            }
+            return; 
+        }
+    } catch (e) { console.log("Error en flujo de productos:", e); }
+}
             // --- 5. COMANDOS DE ADMINISTRADOR ---
             if (isAdmin) {
                 if (text === 'dolar' || text === 'bcv' || text === 'paralelo' ) {
