@@ -56,7 +56,6 @@ const MENU_TEXT = `📋 *MENÚ PRINCIPAL ONE4CARS*
 
 _Escriba el número de la opción o su consulta directamente._`;
 
-// ===== MAPA DE INTENCIONES REFORMULADO (Para evitar falsos positivos) =====
 const MENU_INTENTIONS = {
     '1': {
         keywords: ['medios de pago', 'pago movil', 'datos de pago', 'como pagar', 'datos bancarios', 'cuentas para pagar'],
@@ -172,12 +171,10 @@ async function buscarVendedor(jid, pushName) {
 
 function detectarIntencionMenu(texto) {
     if (!texto) return null;
-    // 1. Verificar si el usuario escribió solo el número (ej: "1", "2")
     if (/^\d$/.test(texto)) {
         const num = texto.charAt(0);
         if (MENU_INTENTIONS[num]) return MENU_INTENTIONS[num].response;
     }
-    // 2. Verificar frases completas para evitar falsos positivos
     for (const key in MENU_INTENTIONS) {
         const intention = MENU_INTENTIONS[key];
         if (intention.keywords.some(phrase => texto.includes(phrase))) {
@@ -238,11 +235,32 @@ async function guardarUsuario(jid, usuario, id_int) {
 
 async function buscarCliente(rifLimpio) {
     const soloNum = soloNumerosRIF(rifLimpio);
+    // IGNORAR GUIONES Y PUNTOS EN LA BÚSQUEDA PARA QUE COINCIDA CON LA DB
     const [r] = await pool.execute(
-        "SELECT id_cliente, nombres, celular, cedula, direccion, zona FROM tab_clientes WHERE clave = ? OR clave = ? OR clave LIKE ? LIMIT 1", 
-        [rifLimpio, soloNum, `%${rifLimpio}%`]
+        `SELECT id_cliente, nombres, celular, cedula, direccion, zona 
+         FROM tab_clientes 
+         WHERE REPLACE(REPLACE(clave, '-', ''), '.', '') = ? 
+            OR REPLACE(REPLACE(clave, '-', ''), '.', '') = ? 
+            OR clave LIKE ? 
+         LIMIT 1`, 
+        [rifLimpio, soloNum, `%${soloNum}%`]
     );
     return r[0] || null;
+}
+
+async function buscarProductoPorCodigo(codigo) {
+    const codLimpio = codigo.trim();
+    // SE ELIMINÓ EL LÍMITE DE STOCK AQUÍ PARA SABER SI EL PRODUCTO EXISTE (AUNQUE ESTÉ AGOTADO)
+    try {
+        const sql = `SELECT producto, descripcion, tipo, precio_final, (cantidad_existencia + cantidad_existencia_almacen) as stock 
+                     FROM tab_productos 
+                     WHERE TRIM(producto) = ? OR TRIM(producto) LIKE ? LIMIT 5`;
+        const [rows] = await pool.execute(sql, [codLimpio, `%${codLimpio}%`]);
+        if (rows.length > 0) return rows;
+    } catch (e) {
+        console.log("Error buscando por código exacto:", e.message);
+    }
+    return null;
 }
 
 async function buscarProductoPorTexto(texto) {
@@ -311,7 +329,7 @@ async function buscarProductoPorTexto(texto) {
     });
 
     try {
-        const sql = `SELECT producto, descripcion, tipo, precio_final FROM tab_productos WHERE ${stockCondition} AND ${whereClause} LIMIT 8`;
+        const sql = `SELECT producto, descripcion, tipo, precio_final, (cantidad_existencia + cantidad_existencia_almacen) as stock FROM tab_productos WHERE ${stockCondition} AND ${whereClause} LIMIT 8`;
         const [rows] = await pool.execute(sql, queryParams);
         if (rows.length > 0) return rows;
     } catch (e) {
@@ -335,7 +353,7 @@ async function buscarProductoPorTexto(texto) {
 
     try {
         const sqlRelevancia = `
-            SELECT producto, descripcion, tipo, precio_final 
+            SELECT producto, descripcion, tipo, precio_final, (cantidad_existencia + cantidad_existencia_almacen) as stock 
             FROM tab_productos 
             WHERE ${stockCondition} AND ${orConditions.join(" OR ")} 
             HAVING (${relevanceSQL}) >= ? 
@@ -598,7 +616,9 @@ async function startBot() {
             if (!rawText) return;
 
             const text = normalizar(rawText);
-            const esRIFPuro = /^[vjgje]?\d+$/i.test(rawText.replace(/[^a-zA-Z0-9]/g, '')) && rawText.length >= 6;
+            
+            const textoLimpioParaRif = rawText.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+            const esRIFPuro = /^[VJGE]\d{8,9}$/.test(textoLimpioParaRif);
 
             await guardarMensaje(from, 'user', rawText);
             const sesion = await getSesion(from);
@@ -653,23 +673,21 @@ async function startBot() {
                 }
                 return await safeSendMessage(from, { text: menuOption });
             }
-         // ============================================================
-            // NUEVO: LÓGICA DE PAGO / ABONO (COLOCAR AQUÍ)
-            // ============================================================
+            
+            // --- NUEVO: LÓGICA DE PAGO / ABONO ---
             if (text === 'pago fact' || text === 'abono'  || text.includes('pago') || text.includes('al señor oscar') || text.includes('envié el pago') || text.includes('adjunto pago')) {
                 const nombreUsuario = vendedor ? vendedor.nombre : pushName;
                 const saludoCordial = `¡Hola *${nombreUsuario}*! Gracias por su mensaje. 😊\n\nRecibido tu mensaje, administración validará su pago a la brevedad.\n\n${MENU_TEXT}`;
                 return await safeSendMessage(from, { text: saludoCordial });
             }
 
-                     // ============================================================
-            // NUEVO: (Factura Fiscal)
-            // ============================================================
+            // --- NUEVO: Factura Fiscal ---
             if (text === 'pago fact' || text === 'factura fiscal'  || text.includes('factura con iva')  ) {
                 const nombreUsuario = vendedor ? vendedor.nombre : pushName;
-                const saludoCordial = `¡Hola *${nombreUsuario}*! Gracias por su mensaje. 😊\n\nLa Factura Fiscalk sera realizada de acuerdo con su solicitud el dia que tenga disponibilidad de hacer el pago.\n\n${MENU_TEXT}`;
+                const saludoCordial = `¡Hola *${nombreUsuario}*! Gracias por su mensaje. 😊\n\nLa Factura Fiscal sera realizada de acuerdo con su solicitud el dia que tenga disponibilidad de hacer el pago.\n\n${MENU_TEXT}`;
                 return await safeSendMessage(from, { text: saludoCordial });
             }
+            
             // --- 3. LÓGICA DE DESPACHOS Y TIEMPOS ---
             if (text.includes("cuando llega mi pedido") || 
                 text.includes("tiempo tardan en despachar") || 
@@ -679,22 +697,36 @@ async function startBot() {
                 return await safeSendMessage(from, { text: "Saludos estimado cliente, su pedido esta disponible en un lapso no mayor de 24 horas" });
             }
 
-            // --- 4. LÓGICA DE PRODUCTOS ---
-            if (text !== 'menu' && !['hola', 'buen dia', 'buenos dias'].includes(text)) {
-                try {
-                    const prods = await buscarProductoPorTexto(rawText);
-                    if (prods) {
-                        const saludos = [
-                            "Saludos estimado , gracias por tu consulta puedo recomendarte estos artículos: 👇",
-                            "¡Hola! He buscado en nuestro inventario y creo que estos artículos es lo que buscas: 👇",
-                            "Con gusto le ayudo. Segun lo que me dices, aquí tienes la mejor opcion disponible: 👇",
-                            "Hola, un placer saludarle. He encontrado estos productos que coinciden con su búsqueda: 👇"
-                        ];
-                        const saludoAzar = saludos[Math.floor(Math.random() * saludos.length)];
-                        await safeSendMessage(from, { text: saludoAzar });
-                        await sleep(1500);
+// --- 4. LÓGICA DE PRODUCTOS (MEJORADA) ---
+            // Nueva lógica: EXTRAEMOS posibles códigos antes de descartar la oración
+            let codigoABuscar = "";
+            const palabras = rawText.split(/\s+/);
+            
+            // Intentamos detectar códigos comunes (ej: MF283, 513113)
+            // Busca palabras que contengan letras y números o solo números largos
+            const posibleCodigo = palabras.find(p => /^[A-Z0-9]{3,}$/i.test(p.replace(/[.,?]/g, '')));
+            
+            if (posibleCodigo) {
+                codigoABuscar = posibleCodigo.replace(/[.,?]/g, '');
+            }
 
-                        for (const p of prods) {
+            if (codigoABuscar !== "" || (text !== 'menu' && !['hola', 'buen dia', 'buenos dias', 'buenas tardes'].includes(text))) {
+                try {
+                    // Usamos el código extraído si existe, sino, buscamos por texto normal
+                    let prods = await buscarProductoPorCodigo(codigoABuscar || rawText);
+                    
+                    if (!prods || prods.length === 0) {
+                        prods = await buscarProductoPorTexto(codigoABuscar || rawText);
+                    }
+
+                    if (prods && prods.length > 0) {
+                        const conStock = prods.filter(p => parseFloat(p.stock) > 0);
+                        const agotados = prods.filter(p => parseFloat(p.stock) <= 0);
+
+                        await safeSendMessage(from, { text: "🔍 *Resultados de búsqueda en inventario:* 👇" });
+                        await sleep(1000);
+
+                        for (const p of conStock) {
                             if (!isBotReady()) break; 
                             const precioLimpio = parseFloat(p.precio_final || 0).toFixed(2);
                             const caption = `📦 *CÓDIGO: ${p.producto}*\n💰 *Precio Final: $${precioLimpio}*\n📝 ${p.descripcion}\n🔗 Ficha: https://one4cars.com/producto_general.php?cod=${p.producto}&tipo=${encodeURIComponent(p.tipo)}`;
@@ -706,7 +738,20 @@ async function startBot() {
                             }
                             await sleep(1500);
                         }
-                        return;
+
+                        for (const p of agotados) {
+                            if (!isBotReady()) break;
+                            const precioLimpio = parseFloat(p.precio_final || 0).toFixed(2);
+                            const msgAgotado = `⚠️ *AVISO: PRODUCTO AGOTADO*\n\n📦 *CÓDIGO: ${p.producto}*\n💰 *Precio: $${precioLimpio}*\n📝 ${p.descripcion}\n🔗 Ficha: https://one4cars.com/producto_general.php?cod=${p.producto}&tipo=${encodeURIComponent(p.tipo)}\n\n_Este producto actualmente no tiene disponibilidad._`;
+                            const imgUrl = `https://one4cars.com/imagen/${p.producto}.jpg`;
+                            try {
+                                await socketBot.sendMessage(from, { image: { url: imgUrl }, caption: msgAgotado });
+                            } catch (imgErr) {
+                                await safeSendMessage(from, { text: msgAgotado });
+                            }
+                            await sleep(1500);
+                        }
+                        return; // Salimos exitosamente tras mostrar productos
                     }
                 } catch (e) { console.log("Error en flujo de productos:", e); }
             }
@@ -729,7 +774,6 @@ async function startBot() {
                 return await safeSendMessage(from, { text: saludoCordial });
             }
 
-                        // --- 6. SALUDO Y MENÚ ---
             if (text === 'Pago fact' || text === 'Abono' ) {
                 const nombreUsuario = vendedor ? vendedor.nombre : pushName;
                 const saludoCordial = `¡Hola *${nombreUsuario}*! Gracias por su mensaje. 😊\n\nrecibido tu mensaje, administracion validara su pago a la brevedad\n\n${MENU_TEXT}`;
