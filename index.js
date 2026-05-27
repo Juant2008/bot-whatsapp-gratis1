@@ -1,3 +1,5 @@
+--- START OF FILE index (25).js ---
+
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const qrcode = require('qrcode');
@@ -56,6 +58,7 @@ const MENU_TEXT = `📋 *MENÚ PRINCIPAL ONE4CARS*
 
 _Escriba el número de la opción o su consulta directamente._`;
 
+// ===== MAPA DE INTENCIONES REFORMULADO =====
 const MENU_INTENTIONS = {
     '1': {
         keywords: ['medios de pago', 'pago movil', 'datos de pago', 'como pagar', 'datos bancarios', 'cuentas para pagar'],
@@ -106,7 +109,7 @@ function normalizar(texto) {
     return texto
         .normalize("NFD")
         .replace(/[\u0300-\u036f]/g, "") 
-        .replace(/[.,\/#!$%\^&\*;:{}=\-_`~()?!]/g, "") 
+        // NO eliminamos la 'x' ni números para no romper las medidas (ej. 39x72)
         .toLowerCase()
         .trim();
 }
@@ -236,33 +239,18 @@ async function guardarUsuario(jid, usuario, id_int) {
 async function buscarCliente(rifLimpio) {
     const soloNum = soloNumerosRIF(rifLimpio);
     const [r] = await pool.execute(
-        `SELECT id_cliente, nombres, celular, cedula, direccion, zona 
-         FROM tab_clientes 
-         WHERE REPLACE(REPLACE(clave, '-', ''), '.', '') = ? 
-            OR REPLACE(REPLACE(clave, '-', ''), '.', '') = ? 
-            OR clave LIKE ? 
-         LIMIT 1`, 
-        [rifLimpio, soloNum, `%${soloNum}%`]
+        "SELECT id_cliente, nombres, celular, cedula, direccion, zona FROM tab_clientes WHERE clave = ? OR clave = ? OR clave LIKE ? LIMIT 1", 
+        [rifLimpio, soloNum, `%${rifLimpio}%`]
     );
     return r[0] || null;
 }
 
-async function buscarProductoPorCodigo(codigo) {
-    const codLimpio = codigo.trim();
-    try {
-        const sql = `SELECT producto, descripcion, tipo, precio_final, (cantidad_existencia + cantidad_existencia_almacen) as stock 
-                     FROM tab_productos 
-                     WHERE TRIM(producto) = ? OR TRIM(producto) LIKE ? LIMIT 5`;
-        const [rows] = await pool.execute(sql, [codLimpio, `%${codLimpio}%`]);
-        if (rows.length > 0) return rows;
-    } catch (e) {
-        console.log("Error buscando por código exacto:", e.message);
-    }
-    return null;
-}
-
+// ============================================================
+// LÓGICA DE BÚSQUEDA DE PRODUCTOS (REFORMULADA Y COMPLETA)
+// ============================================================
 async function buscarProductoPorTexto(texto) {
     const txtNormal = normalizar(texto);
+    
     const stopWords = [
         'tienes', 'la', 'del', 'quiere', 'saber', 'cuanto', 'mide', 'venden', 'donde',
         'precio', 'tienen', 'el', 'una', 'un', 'hay', 'si', 'es', 'de', 'con', 'para',
@@ -293,79 +281,39 @@ async function buscarProductoPorTexto(texto) {
         'llegando', 'pais', 'país', 'atento'
     ];
 
-    const palabrasBase = txtNormal.split(' ')
-        .filter(p => p.length > 2 && !stopWords.includes(p));
+    // Si el texto contiene una 'x', es probable que sea una medida. 
+    // No filtramos palabras para no romper la cadena "39x72"
+    const esMedida = txtNormal.includes('x');
+    let palabrasBase = [];
+
+    if (esMedida) {
+        palabrasBase = [txtNormal];
+    } else {
+        palabrasBase = txtNormal.split(' ')
+            .filter(p => p.length > 2 && !stopWords.includes(p));
+    }
 
     if (palabrasBase.length === 0) return null;
 
-    const positionalWords = ['superior', 'sup', 'inferior', 'inf', 'interno', 'int', 'externo', 'ext', 'derecha', 'der', 'izquierda', 'izq'];
-    const isOnlyPositional = palabrasBase.every(p => positionalWords.includes(p));
-    if (isOnlyPositional) return null;
-
-    const expandirFormas = (pal) => {
-        const f = [pal];
-        if (pal.endsWith('es') && pal.length > 4) f.push(pal.slice(0, -2));
-        if (pal.endsWith('s') && pal.length > 3 && !pal.endsWith('es')) f.push(pal.slice(0, -1));
-        if (!pal.endsWith('s')) {
-            f.push(pal + 's');
-            if (pal.endsWith('z')) f.push(pal.slice(0, -1) + 'ces');
-        }
-        return [...new Set(f)];
-    };
-
     const stockCondition = "(cantidad_existencia + cantidad_existencia_almacen > 0)";
-    
-    // --- OPTIMIZACIÓN 1: BÚSQUEDA INTERSECCIÓN ESTRICTA (AND) ---
-    // Obliga a que los artículos devueltos contengan TODAS las palabras clave principales.
     let whereClause = "";
     let queryParams = [];
 
     palabrasBase.forEach((pal, index) => {
-        const formas = expandirFormas(pal);
-        const conditions = formas.map(() => "descripcion LIKE ?");
-        whereClause += `(${conditions.join(" OR ")})`;
+        // BUSQUEDA TRIPLE: Campo producto, Campo descripcion Y Campo equivalencia
+        const condition = `(producto LIKE ? OR descripcion LIKE ? OR equivalencia LIKE ?)`;
+        whereClause += condition;
         if (index < palabrasBase.length - 1) whereClause += " AND ";
-        formas.forEach(f => queryParams.push(`%${f}%`));
+        queryParams.push(`%${pal}%`, `%${pal}%`, `%${pal}%`);
     });
 
     try {
-        const sql = `SELECT producto, descripcion, tipo, precio_final, (cantidad_existencia + cantidad_existencia_almacen) as stock FROM tab_productos WHERE ${whereClause} LIMIT 8`;
+        // Buscamos coincidencias en cualquiera de los 3 campos
+        const sql = `SELECT producto, descripcion, tipo, precio_final FROM tab_productos WHERE ${stockCondition} AND ${whereClause} LIMIT 8`;
         const [rows] = await pool.execute(sql, queryParams);
         if (rows.length > 0) return rows;
     } catch (e) {
-        console.log("Error Intento 1 (Strict AND):", e.message);
-    }
-
-    // --- OPTIMIZACIÓN 2: CORRECCIÓN DEL FILTRO DE RELEVANCIA EN CAÍDA ---
-    // Si la búsqueda estricta falla, se evalúa relevancia matemática, pero restringiendo a coincidencias altas.
-    let minRelevance = palabrasBase.length; 
-    if (palabrasBase.length >= 3) minRelevance = palabrasBase.length - 1; 
-    if (palabrasBase.length >= 5) minRelevance = palabrasBase.length - 2;
-
-    const expandedTerms = [...new Set(palabrasBase.flatMap(expandirFormas))];
-    const orConditions = expandedTerms.map(() => "descripcion LIKE ?");
-    const orParams = expandedTerms.map(p => `%${p}%`);
-
-    const relevanceParts = palabrasBase.map(p => {
-        const formas = expandirFormas(p);
-        const cases = formas.map(f => `descripcion LIKE '%${f.replace(/[^a-z0-9]/g, '')}%'`);
-        return `(CASE WHEN ${cases.join(' OR ')} THEN 1 ELSE 0 END)`;
-    });
-    const relevanceSQL = relevanceParts.join(' + ');
-
-    try {
-        const sqlRelevancia = `
-            SELECT producto, descripcion, tipo, precio_final, (cantidad_existencia + cantidad_existencia_almacen) as stock 
-            FROM tab_productos 
-            WHERE (${orConditions.join(" OR ")}) 
-            HAVING (${relevanceSQL}) >= ? 
-            ORDER BY ${relevanceSQL} DESC, ${stockCondition} DESC 
-            LIMIT 8`;
-            
-        const [rows] = await pool.execute(sqlRelevancia, [...orParams, minRelevance]);
-        if (rows.length > 0) return rows;
-    } catch (e) {
-        console.log("Error Intento 2 (Relevance Fallback):", e.message);
+        console.log("Error en flujo de productos:", e);
     }
 
     return null;
@@ -444,7 +392,7 @@ function obtenerTonoMensaje(nivel, f, monto, fecha) {
     if (nivel >= 60) {
         return `🧾 *AVISO DE PAGO PENDIENTE*\n\nHola *${f.nombres}*, la factura *N° ${f.nro_factura}* emitida el *${fecha}* ya superó los 60 días de vencida con un saldo de *$${monto.toFixed(2)}*.\n\nEl retraso en el pago afecta la rotación de nuestros productos y la disponibilidad de inventario para todos nuestros clientes. Le agradecemos realizar el pago a la mayor brevedad posible.\n\nQuedamos a su disposición para cualquier duda o gestión. 🚗`;
     }
-    return `🧾 *RECORDATORIO DE PAGO*\n\nHola *${f.nombres}*, le recordamos amablemente que la factura *N° ${f.nro_factura}* con fecha *${fecha}* presents un saldo pendiente de *$${monto.toFixed(2)}*.\n\nLe agradecemos gestionar el pago para mantener su cuenta al día. Estamos a su disposición para cualquier consulta. 🚗`;
+    return `🧾 *RECORDATORIO DE PAGO*\n\nHola *${f.nombres}*, le recordamos amablemente que la factura *N° ${f.nro_factura}* con fecha *${fecha}* presenta un saldo pendiente de *$${monto.toFixed(2)}*.\n\nLe agradecemos gestionar el pago para mantener su cuenta al día. Estamos a su disposición para cualquier consulta. 🚗`;
 }
 
 async function checkFacturasVencidas() {
@@ -618,15 +566,45 @@ async function startBot() {
             if (!rawText) return;
 
             const text = normalizar(rawText);
-            
-            const textoLimpioParaRif = rawText.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
-            const esRIFPuro = /^[VJGE]\d{8,9}$/.test(textoLimpioParaRif);
-
             await guardarMensaje(from, 'user', rawText);
             const sesion = await getSesion(from);
             if (sesion && sesion.modo === 'humano' && !isAdmin) return;
 
-            // --- 1. LÓGICA DE RIF (SÓLO ADMINS) ---
+            // --- 1. PRIORIDAD: BUSCAR PRODUCTOS ---
+            // Buscamos productos antes que RIFs para evitar que códigos numéricos sean tomados como RIFs.
+            if (!['hola', 'buen dia', 'buenos dias', 'menu'].includes(text)) {
+                try {
+                    const prods = await buscarProductoPorTexto(rawText);
+                    if (prods) {
+                        const saludos = [
+                            "Saludos estimado , gracias por tu consulta puedo recomendarte estos artículos: 👇",
+                            "¡Hola! He buscado en nuestro inventario y creo que estos artículos es lo que buscas: 👇",
+                            "Con gusto le ayudo. Segun lo que me dices, aquí tienes la mejor opcion disponible: 👇",
+                            "Hola, un placer saludarle. He encontrado estos productos que coinciden con su búsqueda: 👇"
+                        ];
+                        const saludoAzar = saludos[Math.floor(Math.random() * saludos.length)];
+                        await safeSendMessage(from, { text: saludoAzar });
+                        await sleep(1500);
+
+                        for (const p of prods) {
+                            if (!isBotReady()) break; 
+                            const precioLimpio = parseFloat(p.precio_final || 0).toFixed(2);
+                            const caption = `📦 *CÓDIGO: ${p.producto}*\n💰 *Precio Final: $${precioLimpio}*\n📝 ${p.descripcion}\n🔗 Ficha: https://one4cars.com/producto_general.php?cod=${p.producto}&tipo=${encodeURIComponent(p.tipo)}`;
+                            const imgUrl = `https://one4cars.com/imagen/${p.producto}.jpg`;
+                            try {
+                                await socketBot.sendMessage(from, { image: { url: imgUrl }, caption: caption });
+                            } catch (imgErr) {
+                                await safeSendMessage(from, { text: caption });
+                            }
+                            await sleep(1500);
+                        }
+                        return; // Si encontró productos, termina aquí.
+                    }
+                } catch (e) { console.log("Error en flujo de productos:", e); }
+            }
+
+            // --- 2. LÓGICA DE RIF (SÓLO SI NO ES PRODUCTO Y EL FORMATO ES CORRECTO) ---
+            const esRIFPuro = /^[vjgje]?\d+$/i.test(rawText.replace(/[^a-zA-Z0-9]/g, '')) && rawText.replace(/[^a-zA-Z0-9]/g, '').length >= 9;
             if (isAdmin && esRIFPuro) {
                 const rifLimpio = limpiarRIF(rawText);
                 const c = await buscarCliente(rifLimpio);
@@ -648,11 +626,14 @@ async function startBot() {
                     }
                     return await safeSendMessage(from, { text: list });
                 } else {
-                    return await safeSendMessage(from, { text: "❌ No se encontró ningún cliente con ese RIF." });
+                    // Solo respondemos que no existe si realmente parece un RIF
+                    if (rawText.length >= 9 && rawText.length <= 11) {
+                        return await safeSendMessage(from, { text: "❌ No se encontró ningún cliente con ese RIF." });
+                    }
                 }
             }
 
-            // --- 2. DETECCIÓN INTELIGENTE DEL MENÚ ---
+            // --- 3. DETECCIÓN INTELIGENTE DEL MENÚ ---
             const menuOption = detectarIntencionMenu(text);
             if (menuOption) {
                 if (menuOption.includes('Estado de cuenta')) {
@@ -675,144 +656,31 @@ async function startBot() {
                 }
                 return await safeSendMessage(from, { text: menuOption });
             }
-            
-            // --- NUEVO: LÓGICA DE PAGO / ABONO ---
+
+            // --- 4. LÓGICA DE PAGOS / ABONOS ---
             if (text === 'pago fact' || text === 'abono'  || text.includes('pago') || text.includes('al señor oscar') || text.includes('envié el pago') || text.includes('adjunto pago')) {
                 const nombreUsuario = vendedor ? vendedor.nombre : pushName;
-                const saludoCordial = `¡Hola *${nombreUsuario}*! Gracias por su mensaje. 😊\n\nRecibido tu mensaje, administración validará su pago a la mayor brevedad.\n\n${MENU_TEXT}`;
+                const saludoCordial = `¡Hola *${nombreUsuario}*! Gracias por su mensaje. 😊\n\nRecibido tu mensaje, administración validará su pago a la brevedad.\n\n${MENU_TEXT}`;
                 return await safeSendMessage(from, { text: saludoCordial });
             }
 
-            // --- NUEVO: Factura Fiscal ---
-            if (text === 'pago fact' || text === 'factura fiscal'  || text.includes('factura con iva')  ) {
+            // --- 5. LÓGICA DE FACTURA FISCAL ---
+            if (text === 'factura fiscal' || text.includes('factura con iva')) {
                 const nombreUsuario = vendedor ? vendedor.nombre : pushName;
-                const saludoCordial = `¡Hola *${nombreUsuario}*! Gracias por su mensaje. 😊\n\nLa Factura Fiscal será realizada de acuerdo con su solicitud el día que tenga disponibilidad de hacer el pago.\n\n${MENU_TEXT}`;
+                const saludoCordial = `¡Hola *${nombreUsuario}*! Gracias por su mensaje. 😊\n\nLa Factura Fiscal sera realizada de acuerdo con su solicitud el dia que tenga disponibilidad de hacer el pago.\n\n${MENU_TEXT}`;
                 return await safeSendMessage(from, { text: saludoCordial });
             }
-            
-            // --- 3. LÓGICA DE DESPACHOS Y TIEMPOS ---
+
+            // --- 6. LÓGICA DE DESPACHOS ---
             if (text.includes("cuando llega mi pedido") || 
                 text.includes("tiempo tardan en despachar") || 
                 text.includes("cuando me llega") || 
                 text.includes("tiempo de entrega") || 
                 text.includes("cuanto tarda el envio")) {
-                return await safeSendMessage(from, { text: "Saludos estimado cliente, su pedido está disponible en un lapso no mayor de 24 hours" });
+                return await safeSendMessage(from, { text: "Saludos estimado cliente, su pedido esta disponible en un lapso no mayor de 24 horas" });
             }
 
-            // --- NUEVO: ENTRADAS DE SALUDOS EXTENDIDOS Y CORTESÍA ---
-            if (text === 'hola buenos dias' || text === 'buenos dias' || text === 'como estas' || text === 'como estas tu' || text === 'hola como estas') {
-                const saludoCalido = `¡Hola! Gusto en saludarlo. Buenos días también para usted. ¿Cómo está usted? Por aquí muy bien, gracias por preguntar. Estoy atento para lo que necesite. 😊\n\n${MENU_TEXT}`;
-                return await safeSendMessage(from, { text: saludoCalido });
-            }
-
-            // --- 4. LÓGICA DE PRODUCTOS (MEJORADA Y CORREGIDA) ---
-            let codigoABuscar = "";
-            const palabras = rawText.split(/\s+/);
-            
-            // Buscamos un código real o medida (ej: MF283, 513113, o dimensiones con 'x' como 39x74)
-            const posibleCodigo = palabras.find(p => {
-                const limpia = p.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()?!]/g, "");
-                const tieneLetras = /[a-zA-Z]/.test(limpia);
-                const tieneNumeros = /[0-9]/.test(limpia);
-                const esMedida = /\d+x\d+/.test(limpia); // Detecta formatos como 39x74 o 39x72x37
-                return (tieneLetras && tieneNumeros && limpia.length >= 3) || (/^[0-9]{4,}$/.test(limpia)) || esMedida;
-            });
-            
-            if (posibleCodigo) {
-                codigoABuscar = posibleCodigo.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()?!]/g, "");
-            }
-
-            // FILTRO INTELIGENTE CONVERSACIONAL ACTUALIZADO
-            let esConversacionalAleatorio = false;
-            
-            // Palabras clave de repuestos del inventario para asegurar que el bot SÍ responda búsquedas de texto corto
-            const palabrasClaveInventario = [
-                'yaris', 'fiesta', 'rolinera', 'tapa', 'tapas', 'filtro', 'filtros', 'radiador', 'motor', 
-                'envase', 'deposito', 'refrigerante', 'ka', 'ecosport', 'optra', 'empacadura', 'valvula', 'cerato'
-            ];
-            
-            const contienePalabraInventario = palabrasClaveInventario.some(p => text.includes(p));
-
-            if (codigoABuscar === "") {
-                const comandosValidos = ['dolar', 'bcv', 'paralelo', 'menu', 'hola', 'buen dia', 'buenos dias', 'buenas tardes', 'pago fact', 'abono', 'como estas', 'como estas tu'];
-                const coincideComando = comandosValidos.includes(text);
-                
-                if (isAdmin) {
-                    // SI ES ADMIN Y EL MENSAJE ES UN TEXTO LARGO (MÁS DE 5 PALABRAS), ES UNA CHARLA CASUAL. SE QUEDA COMPLETAMENTE CALLADO.
-                    if (!coincideComando && (palabras.length > 5 || !contienePalabraInventario)) {
-                        esConversacionalAleatorio = true;
-                    }
-                } else {
-                    // Para usuarios comunes, si el texto es largo y no busca nada directamente
-                    const palabrasFiltro = palabras.filter(p => p.length > 1);
-                    const tieneIntencionBusqueda = text.includes('tienes') || text.includes('hay') || text.includes('busco') || 
-                                                   text.includes('precio') || text.includes('venden') || text.includes('disponibilidad') || 
-                                                   text.includes('buscar') || text.includes('necesito') || text.includes('cotizar') ||
-                                                   text.includes('repuesto') || text.includes('producto') || contienePalabraInventario;
-                    
-                    if (!coincideComando && !tieneIntencionBusqueda && palabrasFiltro.length > 6) {
-                        esConversacionalAleatorio = true;
-                    }
-                }
-            }
-
-            // Si es una conversación casual real sin intención de inventario, salimos en silencio
-            if (esConversacionalAleatorio) {
-                return;
-            }
-
-            if (codigoABuscar !== "" || contienePalabraInventario || (text !== 'menu' && !['hola', 'buen dia', 'buenos dias', 'buenas tardes', 'como estas', 'como estas tu'].includes(text))) {
-                try {
-                    let prods = null;
-                    
-                    // Si encontramos algo que cumple como código o medida, lo buscamos primero
-                    if (codigoABuscar !== "") {
-                        prods = await buscarProductoPorCodigo(codigoABuscar);
-                    }
-                    
-                    // Si no se encontró por código o no había código en absoluto, buscamos por descripción usando todo el texto original
-                    if (!prods || prods.length === 0) {
-                        prods = await buscarProductoPorTexto(rawText);
-                    }
-
-                    if (prods && prods.length > 0) {
-                        const conStock = prods.filter(p => parseFloat(p.stock) > 0);
-                        const agotados = prods.filter(p => parseFloat(p.stock) <= 0);
-
-                        await safeSendMessage(from, { text: "🔍 *Resultados de búsqueda en inventario:* 👇" });
-                        await sleep(1000);
-
-                        for (const p of conStock) {
-                            if (!isBotReady()) break; 
-                            const precioLimpio = parseFloat(p.precio_final || 0).toFixed(2);
-                            const caption = `📦 *CÓDIGO: ${p.producto}*\n💰 *Precio Final: $${precioLimpio}*\n📝 ${p.descripcion}\n🔗 Ficha: https://one4cars.com/producto_general.php?cod=${p.producto}&tipo=${encodeURIComponent(p.tipo)}`;
-                            const imgUrl = `https://one4cars.com/imagen/${p.producto}.jpg`;
-                            try {
-                                await socketBot.sendMessage(from, { image: { url: imgUrl }, caption: caption });
-                            } catch (imgErr) {
-                                await safeSendMessage(from, { text: caption });
-                            }
-                            await sleep(1500);
-                        }
-
-                        for (const p of agotados) {
-                            if (!isBotReady()) break;
-                            const precioLimpio = parseFloat(p.precio_final || 0).toFixed(2);
-                            const msgAgotado = `⚠️ *AVISO: PRODUCTO AGOTADO*\n\n📦 *CÓDIGO: ${p.producto}*\n💰 *Precio: $${precioLimpio}*\n📝 ${p.descripcion}\n🔗 Ficha: https://one4cars.com/producto_general.php?cod=${p.producto}&tipo=${encodeURIComponent(p.tipo)}\n\n_Este producto actualmente no tiene disponibilidad._`;
-                            const imgUrl = `https://one4cars.com/imagen/${p.producto}.jpg`;
-                            try {
-                                await socketBot.sendMessage(from, { image: { url: imgUrl }, caption: msgAgotado });
-                            } catch (imgErr) {
-                                await safeSendMessage(from, { text: msgAgotado });
-                            }
-                            await sleep(1500);
-                        }
-                        return; // Búsqueda completada de forma exitosa
-                    }
-                } catch (e) { console.log("Error en flujo de productos:", e); }
-            }
-
-            // --- 5. COMANDOS DE ADMINISTRADOR ---
+            // --- 7. COMANDOS DE ADMINISTRADOR ---
             if (isAdmin) {
                 if (text === 'dolar' || text === 'bcv' || text === 'paralelo' ) {
                     await actualizarDolar();
@@ -823,15 +691,15 @@ async function startBot() {
                 }
             }
 
-            // --- 6. SALUDO Y MENÚ ---
+            // --- 8. SALUDO Y MENÚ ---
             if (text === 'menu' || text === 'hola' || text === 'buen dia' || text === 'buenos dias') {
                 const nombreUsuario = vendedor ? vendedor.nombre : pushName;
                 const saludoCordial = `¡Hola *${nombreUsuario}*! Es un gusto saludarte. 😊\n\n¿En qué podemos ayudarte hoy? Por favor, indícanos qué servicio necesitas o consulta nuestro menú a continuación:\n\n${MENU_TEXT}`;
                 return await safeSendMessage(from, { text: saludoCordial });
             }
             
-            // --- 7. FALLBACK ---
-            const conversationalShorts = ['si', 'no', 'ok', 'vale', 'gracias', 'ya', 'entendido', 'está bien', 'bueno', 'dale', 'está ok', 'está bien', 'claro'];
+            // --- 9. FALLBACK ---
+            const conversationalShorts = ['si', 'no', 'ok', 'vale', 'gracias', 'ya', 'entendido', 'está bien', 'bueno', 'dale', 'está ok', 'claro'];
             if (conversationalShorts.includes(text)) return; 
             if (rawText.length > 500) return;
 
@@ -923,7 +791,7 @@ const server = http.createServer(async (req, res) => {
         const enviados = await notificador.obtenerRecordatoriosEnviados();
         res.end(`<!DOCTYPE html><html><head><meta charset="UTF-8"><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><title>Recordatorios</title></head><body class="bg-light">${header}<div class="container mt-5"><div class="card shadow-lg p-4 mx-auto" style="max-width: 800px; border-radius: 15px;"><h3>📅 Recordatorios</h3><hr><table class="table table-sm"><thead><tr><th>Factura</th><th>Cliente</th><th>Días</th><th>Estado</th></tr></thead><tbody>${facturas.map(f => `<tr><td>${f.nro_factura}</td><td>${f.nombres}</td><td>${f.dias_vencida}</td><td>${(enviados[f.id_factura]) ? '✅' : '⏳'}</td></tr>`).join('')}</tbody></table><a href="/" class="btn btn-outline-secondary">Volver</a></div></div></body></html>`);
     } else {
-        res.end(`<!DOCTYPE html><html><head><meta charset="UTF-8"><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><meta http-equiv="refresh" content="30"><title>Admin ONE4CARS</title></head><body style="background-color: #f4f7f6;\">${header}<div class="container text-center"><div class="card shadow-lg p-4 mx-auto" style="max-width: 500px; border-radius: 15px;"><h4 class="mb-3">Estado del Bot</h4><div class="my-4">${qrCodeData.startsWith('data') ? `<img src="${qrCodeData}" class="img-fluid rounded" style="max-width: 250px;">` : `<h2 class="text-success">${qrCodeData}</h2>`}</div><p>BCV: ${dolarInfo.bcv} | Paralelo: ${dolarInfo.paralelo}</p><div class="d-grid gap-2"><a href="/cobranza" class="btn btn-primary">PANEL DE COBRANZA</a><a href="/marketing-panel" class="btn btn-info text-white">PANEL DE MARKETING</a><a href="/notificador-estado" class="btn btn-secondary text-white">NOTIFICADOR</a><a href="/recordatorio-estado" class="btn btn-warning text-dark">RECORDATORIOS</a></div></div></div></body></html>`);
+        res.end(`<!DOCTYPE html><html><head><meta charset="UTF-8"><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><meta http-equiv="refresh" content="30"><title>Admin ONE4CARS</title></head><body style="background-color: #f4f7f6;">${header}<div class="container text-center"><div class="card shadow-lg p-4 mx-auto" style="max-width: 500px; border-radius: 15px;"><h4 class="mb-3">Estado del Bot</h4><div class="my-4">${qrCodeData.startsWith('data') ? `<img src="${qrCodeData}" class="img-fluid rounded" style="max-width: 250px;">` : `<h2 class="text-success">${qrCodeData}</h2>`}</div><p>BCV: ${dolarInfo.bcv} | Paralelo: ${dolarInfo.paralelo}</p><div class="d-grid gap-2"><a href="/cobranza" class="btn btn-primary">PANEL DE COBRANZA</a><a href="/marketing-panel" class="btn btn-info text-white">PANEL DE MARKETING</a><a href="/notificador-estado" class="btn btn-secondary text-white">NOTIFICADOR</a><a href="/recordatorio-estado" class="btn btn-warning text-dark">RECORDATORIOS</a></div></div></div></body></html>`);
     }
 });
 
