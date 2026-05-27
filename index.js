@@ -56,7 +56,6 @@ const MENU_TEXT = `📋 *MENÚ PRINCIPAL ONE4CARS*
 
 _Escriba el número de la opción o su consulta directamente._`;
 
-// ===== MAPA DE INTENCIONES REFORMULADO =====
 const MENU_INTENTIONS = {
     '1': {
         keywords: ['medios de pago', 'pago movil', 'datos de pago', 'como pagar', 'datos bancarios', 'cuentas para pagar'],
@@ -236,22 +235,27 @@ async function guardarUsuario(jid, usuario, id_int) {
 
 async function buscarCliente(rifLimpio) {
     const soloNum = soloNumerosRIF(rifLimpio);
+    // IGNORAR GUIONES Y PUNTOS EN LA BÚSQUEDA PARA QUE COINCIDA CON LA DB
     const [r] = await pool.execute(
-        "SELECT id_cliente, nombres, celular, cedula, direccion, zona FROM tab_clientes WHERE clave = ? OR clave = ? OR clave LIKE ? LIMIT 1", 
-        [rifLimpio, soloNum, `%${rifLimpio}%`]
+        `SELECT id_cliente, nombres, celular, cedula, direccion, zona 
+         FROM tab_clientes 
+         WHERE REPLACE(REPLACE(clave, '-', ''), '.', '') = ? 
+            OR REPLACE(REPLACE(clave, '-', ''), '.', '') = ? 
+            OR clave LIKE ? 
+         LIMIT 1`, 
+        [rifLimpio, soloNum, `%${soloNum}%`]
     );
     return r[0] || null;
 }
 
-// --- BÚSQUEDA POR CÓDIGO (SÓLUCIONADA CON TRIM) ---
 async function buscarProductoPorCodigo(codigo) {
     const codLimpio = codigo.trim();
-    if (!codLimpio) return null;
-    const stockCondition = "(cantidad_existencia + cantidad_existencia_almacen > 0)";
+    // SE ELIMINÓ EL LÍMITE DE STOCK AQUÍ PARA SABER SI EL PRODUCTO EXISTE (AUNQUE ESTÉ AGOTADO)
     try {
-        // Usamos TRIM en el campo de la DB para evitar fallos por espacios invisibles
-        const sql = `SELECT producto, descripcion, tipo, precio_final FROM tab_productos WHERE TRIM(producto) = ? AND ${stockCondition} LIMIT 1`;
-        const [rows] = await pool.execute(sql, [codLimpio]);
+        const sql = `SELECT producto, descripcion, tipo, precio_final, (cantidad_existencia + cantidad_existencia_almacen) as stock 
+                     FROM tab_productos 
+                     WHERE TRIM(producto) = ? OR TRIM(producto) LIKE ? LIMIT 5`;
+        const [rows] = await pool.execute(sql, [codLimpio, `%${codLimpio}%`]);
         if (rows.length > 0) return rows;
     } catch (e) {
         console.log("Error buscando por código exacto:", e.message);
@@ -259,7 +263,6 @@ async function buscarProductoPorCodigo(codigo) {
     return null;
 }
 
-// --- BÚSQUEDA POR TEXTO (SÓLUCIONADA CON RELEVANCIA) ---
 async function buscarProductoPorTexto(texto) {
     const txtNormal = normalizar(texto);
     const stopWords = [
@@ -278,13 +281,18 @@ async function buscarProductoPorTexto(texto) {
         'pueden', 'podemos', 'podria', 'hacer', 'hace', 'hacen', 'ser', 'estar', 'tener',
         'tengo', 'tenemos', 'tiene', 'decir', 'dice', 'dicen', 'digo', 'ver', 'veo',
         'ven', 'vez', 'veces', 'quiero', 'quiere', 'quieren', 'queremos', 'gustaria',
-        'gusta', 'gustan', 'gusto', 'necesita', 'necesitan', 'necesitamos', 'pueda','UNID.','unid.','unidades','unidad','UNIDADES',
+        'gusta', 'gustan', 'gusto', 'necesita', 'necesitan', 'necesitamos', 'pueda','UNID.','unid.','unidades','unidad','UNIDADES','unidades',
         'puedas', 'pudiera', 'pudieras', 'listo', 'claro', 'ok', 'okey', 'vale', 'va',
         'vamos', 'vaya', 'algun', 'alguna', 'algunos', 'algunas', 'ningun', 'ninguna',
         'tipo', 'tipos', 'preguntar', 'disculpa', 'disculpe', 'permiso', 'ayudar',
         'apoyo', 'consulta', 'consultar', 'info', 'informacion', 'decirme', 'dime',
         'avísame', 'avisa', 'saber', 'sabes', 'saben', 'sabemos',
-        'pana', 'panas', 'brother', 'bro', 'amigo', 'amigos', 'compa', 'compadre'
+        'pana', 'panas', 'brother', 'bro', 'amigo', 'amigos', 'compa', 'compadre',
+        'ando', 'andas', 'andan', 'andaba', 'andabas', 'andabamos', 'andaban',
+        'estoy', 'estas', 'esta', 'estaba', 'estabas', 'estabamos', 'estaban',
+        'vengo', 'vienes', 'viene', 'vienen', 'venia', 'venias', 'veniamos', 'venian',
+        'voy', 'vas', 'va', 'vamos', 'van', 'iba', 'ibas', 'ibamos', 'iban',
+        'llegando', 'pais', 'país', 'atento'
     ];
 
     const palabrasBase = txtNormal.split(' ')
@@ -293,36 +301,69 @@ async function buscarProductoPorTexto(texto) {
     if (palabrasBase.length === 0) return null;
 
     const positionalWords = ['superior', 'sup', 'inferior', 'inf', 'interno', 'int', 'externo', 'ext', 'derecha', 'der', 'izquierda', 'izq'];
-    if (palabrasBase.every(p => positionalWords.includes(p))) return null;
+    const isOnlyPositional = palabrasBase.every(p => positionalWords.includes(p));
+    if (isOnlyPositional) return null;
+
+    const expandirFormas = (pal) => {
+        const f = [pal];
+        if (pal.endsWith('es') && pal.length > 4) f.push(pal.slice(0, -2));
+        if (pal.endsWith('s') && pal.length > 3 && !pal.endsWith('es')) f.push(pal.slice(0, -1));
+        if (!pal.endsWith('s')) {
+            f.push(pal + 's');
+            if (pal.endsWith('z')) f.push(pal.slice(0, -1) + 'ces');
+        }
+        return [...new Set(f)];
+    };
 
     const stockCondition = "(cantidad_existencia + cantidad_existencia_almacen > 0)";
     
-    // Sistema de puntuación: +1 por cada palabra clave encontrada
-    let relevanceSQL = "";
+    let whereClause = "";
     let queryParams = [];
 
     palabrasBase.forEach((pal, index) => {
-        relevanceSQL += `(CASE WHEN descripcion LIKE ? THEN 1 ELSE 0 END)`;
-        queryParams.push(`%${pal}%`);
-        if (index < palabrasBase.length - 1) relevanceSQL += " + ";
+        const formas = expandirFormas(pal);
+        const conditions = formas.map(() => "descripcion LIKE ?");
+        whereClause += `(${conditions.join(" OR ")})`;
+        if (index < palabrasBase.length - 1) whereClause += " AND ";
+        formas.forEach(f => queryParams.push(`%${f}%`));
     });
 
-    // Aseguramos que al menos una palabra coincida
-    const orConditions = palabrasBase.map(() => "descripcion LIKE ?").join(" OR ");
-    const finalParams = [...queryParams, ...queryParams];
+    try {
+        const sql = `SELECT producto, descripcion, tipo, precio_final, (cantidad_existencia + cantidad_existencia_almacen) as stock FROM tab_productos WHERE ${stockCondition} AND ${whereClause} LIMIT 8`;
+        const [rows] = await pool.execute(sql, queryParams);
+        if (rows.length > 0) return rows;
+    } catch (e) {
+        console.log("Error Intento 1:", e.message);
+    }
+
+    let minRelevance = 1;
+    if (palabrasBase.length >= 3) minRelevance = 2; 
+    if (palabrasBase.length >= 5) minRelevance = 3;
+
+    const expandedTerms = [...new Set(palabrasBase.flatMap(expandirFormas))];
+    const orConditions = expandedTerms.map(() => "descripcion LIKE ?");
+    const orParams = expandedTerms.map(p => `%${p}%`);
+
+    const relevanceParts = palabrasBase.map(p => {
+        const formas = expandirFormas(p);
+        const cases = formas.map(f => `descripcion LIKE '%${f.replace(/[^a-z]/g, '')}%'`);
+        return `(CASE WHEN ${cases.join(' OR ')} THEN 1 ELSE 0 END)`;
+    });
+    const relevanceSQL = relevanceParts.join(' + ');
 
     try {
-        const sql = `
-            SELECT producto, descripcion, tipo, precio_final, (${relevanceSQL}) as relevancia
+        const sqlRelevancia = `
+            SELECT producto, descripcion, tipo, precio_final, (cantidad_existencia + cantidad_existencia_almacen) as stock 
             FROM tab_productos 
-            WHERE ${stockCondition} AND (${orConditions}) 
-            ORDER BY relevancia DESC, precio_final ASC 
+            WHERE ${stockCondition} AND ${orConditions.join(" OR ")} 
+            HAVING (${relevanceSQL}) >= ? 
+            ORDER BY ${relevanceSQL} DESC 
             LIMIT 8`;
             
-        const [rows] = await pool.execute(sql, finalParams);
-        if (rows.length > 0 && rows[0].relevancia > 0) return rows;
+        const [rows] = await pool.execute(sqlRelevancia, [...orParams, minRelevance]);
+        if (rows.length > 0) return rows;
     } catch (e) {
-        console.log("Error en búsqueda de relevancia:", e.message);
+        console.log("Error Intento 2:", e.message);
     }
 
     return null;
@@ -632,22 +673,22 @@ async function startBot() {
                 }
                 return await safeSendMessage(from, { text: menuOption });
             }
-
-            // --- LÓGICA DE PAGO / ABONO ---
+            
+            // --- NUEVO: LÓGICA DE PAGO / ABONO ---
             if (text === 'pago fact' || text === 'abono'  || text.includes('pago') || text.includes('al señor oscar') || text.includes('envié el pago') || text.includes('adjunto pago')) {
                 const nombreUsuario = vendedor ? vendedor.nombre : pushName;
                 const saludoCordial = `¡Hola *${nombreUsuario}*! Gracias por su mensaje. 😊\n\nRecibido tu mensaje, administración validará su pago a la brevedad.\n\n${MENU_TEXT}`;
                 return await safeSendMessage(from, { text: saludoCordial });
             }
 
-            // --- LÓGICA DE FACTURA FISCAL ---
-            if (text === 'factura fiscal'  || text.includes('factura con iva') ) {
+            // --- NUEVO: Factura Fiscal ---
+            if (text === 'pago fact' || text === 'factura fiscal'  || text.includes('factura con iva')  ) {
                 const nombreUsuario = vendedor ? vendedor.nombre : pushName;
-                const saludoCordial = `¡Hola *${nombreUsuario}*! Gracias por su mensaje. 😊\n\nLa Factura Fiscal será realizada de acuerdo con su solicitud el día que tenga disponibilidad de hacer el pago.\n\n${MENU_TEXT}`;
+                const saludoCordial = `¡Hola *${nombreUsuario}*! Gracias por su mensaje. 😊\n\nLa Factura Fiscal sera realizada de acuerdo con su solicitud el dia que tenga disponibilidad de hacer el pago.\n\n${MENU_TEXT}`;
                 return await safeSendMessage(from, { text: saludoCordial });
             }
-
-            // --- LÓGICA DE DESPACHOS ---
+            
+            // --- 3. LÓGICA DE DESPACHOS Y TIEMPOS ---
             if (text.includes("cuando llega mi pedido") || 
                 text.includes("tiempo tardan en despachar") || 
                 text.includes("cuando me llega") || 
@@ -656,29 +697,36 @@ async function startBot() {
                 return await safeSendMessage(from, { text: "Saludos estimado cliente, su pedido esta disponible en un lapso no mayor de 24 horas" });
             }
 
-            // --- 4. LÓGICA DE PRODUCTOS (CORREGIDA) ---
-            if (text !== 'menu' && !['hola', 'buen dia', 'buenos dias'].includes(text)) {
+// --- 4. LÓGICA DE PRODUCTOS (MEJORADA) ---
+            // Nueva lógica: EXTRAEMOS posibles códigos antes de descartar la oración
+            let codigoABuscar = "";
+            const palabras = rawText.split(/\s+/);
+            
+            // Intentamos detectar códigos comunes (ej: MF283, 513113)
+            // Busca palabras que contengan letras y números o solo números largos
+            const posibleCodigo = palabras.find(p => /^[A-Z0-9]{3,}$/i.test(p.replace(/[.,?]/g, '')));
+            
+            if (posibleCodigo) {
+                codigoABuscar = posibleCodigo.replace(/[.,?]/g, '');
+            }
+
+            if (codigoABuscar !== "" || (text !== 'menu' && !['hola', 'buen dia', 'buenos dias', 'buenas tardes'].includes(text))) {
                 try {
-                    // 1. Buscar primero por Código Exacto (Prioridad Máxima)
-                    let prods = await buscarProductoPorCodigo(rawText);
+                    // Usamos el código extraído si existe, sino, buscamos por texto normal
+                    let prods = await buscarProductoPorCodigo(codigoABuscar || rawText);
                     
-                    // 2. Si no es código, buscar por Texto con Relevancia
-                    if (!prods) {
-                        prods = await buscarProductoPorTexto(rawText);
+                    if (!prods || prods.length === 0) {
+                        prods = await buscarProductoPorTexto(codigoABuscar || rawText);
                     }
 
-                    if (prods) {
-                        const saludos = [
-                            "Saludos estimado, gracias por tu consulta puedo recomendarte estos artículos: 👇",
-                            "¡Hola! He buscado en nuestro inventario y estos artículos coinciden con tu búsqueda: 👇",
-                            "Con gusto le ayudo. Aquí tienes las mejores opciones disponibles: 👇",
-                            "Hola, un placer saludarle. He encontrado estos productos: 👇"
-                        ];
-                        const saludoAzar = saludos[Math.floor(Math.random() * saludos.length)];
-                        await safeSendMessage(from, { text: saludoAzar });
-                        await sleep(1500);
+                    if (prods && prods.length > 0) {
+                        const conStock = prods.filter(p => parseFloat(p.stock) > 0);
+                        const agotados = prods.filter(p => parseFloat(p.stock) <= 0);
 
-                        for (const p of prods) {
+                        await safeSendMessage(from, { text: "🔍 *Resultados de búsqueda en inventario:* 👇" });
+                        await sleep(1000);
+
+                        for (const p of conStock) {
                             if (!isBotReady()) break; 
                             const precioLimpio = parseFloat(p.precio_final || 0).toFixed(2);
                             const caption = `📦 *CÓDIGO: ${p.producto}*\n💰 *Precio Final: $${precioLimpio}*\n📝 ${p.descripcion}\n🔗 Ficha: https://one4cars.com/producto_general.php?cod=${p.producto}&tipo=${encodeURIComponent(p.tipo)}`;
@@ -690,7 +738,20 @@ async function startBot() {
                             }
                             await sleep(1500);
                         }
-                        return; // Detenemos el flujo aquí para que no diga "no entiendo"
+
+                        for (const p of agotados) {
+                            if (!isBotReady()) break;
+                            const precioLimpio = parseFloat(p.precio_final || 0).toFixed(2);
+                            const msgAgotado = `⚠️ *AVISO: PRODUCTO AGOTADO*\n\n📦 *CÓDIGO: ${p.producto}*\n💰 *Precio: $${precioLimpio}*\n📝 ${p.descripcion}\n🔗 Ficha: https://one4cars.com/producto_general.php?cod=${p.producto}&tipo=${encodeURIComponent(p.tipo)}\n\n_Este producto actualmente no tiene disponibilidad._`;
+                            const imgUrl = `https://one4cars.com/imagen/${p.producto}.jpg`;
+                            try {
+                                await socketBot.sendMessage(from, { image: { url: imgUrl }, caption: msgAgotado });
+                            } catch (imgErr) {
+                                await safeSendMessage(from, { text: msgAgotado });
+                            }
+                            await sleep(1500);
+                        }
+                        return; // Salimos exitosamente tras mostrar productos
                     }
                 } catch (e) { console.log("Error en flujo de productos:", e); }
             }
@@ -712,9 +773,15 @@ async function startBot() {
                 const saludoCordial = `¡Hola *${nombreUsuario}*! Es un gusto saludarte. 😊\n\n¿En qué podemos ayudarte hoy? Por favor, indícanos qué servicio necesitas o consulta nuestro menú a continuación:\n\n${MENU_TEXT}`;
                 return await safeSendMessage(from, { text: saludoCordial });
             }
+
+            if (text === 'Pago fact' || text === 'Abono' ) {
+                const nombreUsuario = vendedor ? vendedor.nombre : pushName;
+                const saludoCordial = `¡Hola *${nombreUsuario}*! Gracias por su mensaje. 😊\n\nrecibido tu mensaje, administracion validara su pago a la brevedad\n\n${MENU_TEXT}`;
+                return await safeSendMessage(from, { text: saludoCordial });
+            }
             
             // --- 7. FALLBACK ---
-            const conversationalShorts = ['si', 'no', 'ok', 'vale', 'gracias', 'ya', 'entendido', 'está bien', 'bueno', 'dale', 'está ok', 'claro'];
+            const conversationalShorts = ['si', 'no', 'ok', 'vale', 'gracias', 'ya', 'entendido', 'está bien', 'bueno', 'dale', 'está ok', 'está bien', 'claro'];
             if (conversationalShorts.includes(text)) return; 
             if (rawText.length > 500) return;
 
@@ -806,7 +873,7 @@ const server = http.createServer(async (req, res) => {
         const enviados = await notificador.obtenerRecordatoriosEnviados();
         res.end(`<!DOCTYPE html><html><head><meta charset="UTF-8"><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><title>Recordatorios</title></head><body class="bg-light">${header}<div class="container mt-5"><div class="card shadow-lg p-4 mx-auto" style="max-width: 800px; border-radius: 15px;"><h3>📅 Recordatorios</h3><hr><table class="table table-sm"><thead><tr><th>Factura</th><th>Cliente</th><th>Días</th><th>Estado</th></tr></thead><tbody>${facturas.map(f => `<tr><td>${f.nro_factura}</td><td>${f.nombres}</td><td>${f.dias_vencida}</td><td>${(enviados[f.id_factura]) ? '✅' : '⏳'}</td></tr>`).join('')}</tbody></table><a href="/" class="btn btn-outline-secondary">Volver</a></div></div></body></html>`);
     } else {
-        res.end(`<!DOCTYPE html><html><head><meta charset="UTF-8"><link href="https://cdn.jsdelivr.net/npm/bootstrap@al.min.css" rel="stylesheet"><meta http-equiv="refresh" content="30"><title>Admin ONE4CARS</title></head><body style="background-color: #f4f7f6;">${header}<div class="container text-center"><div class="card shadow-lg p-4 mx-auto" style="max-width: 500px; border-radius: 15px;"><h4 class="mb-3">Estado del Bot</h4><div class="my-4">${qrCodeData.startsWith('data') ? `<img src="${qrCodeData}" class="img-fluid rounded" style="max-width: 250px;">` : `<h2 class="text-success">${qrCodeData}</h2>`}</div><p>BCV: ${dolarInfo.bcv} | Paralelo: ${dolarInfo.paralelo}</p><div class="d-grid gap-2"><a href="/cobranza" class="btn btn-primary">PANEL DE COBRANZA</a><a href="/marketing-panel" class="btn btn-info text-white">PANEL DE MARKETING</a><a href="/notificador-estado" class="btn btn-secondary text-white">NOTIFICADOR</a><a href="/recordatorio-estado" class="btn btn-warning text-dark">RECORDATORIOS</a></div></div></div></body></html>`);
+        res.end(`<!DOCTYPE html><html><head><meta charset="UTF-8"><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><meta http-equiv="refresh" content="30"><title>Admin ONE4CARS</title></head><body style="background-color: #f4f7f6;">${header}<div class="container text-center"><div class="card shadow-lg p-4 mx-auto" style="max-width: 500px; border-radius: 15px;"><h4 class="mb-3">Estado del Bot</h4><div class="my-4">${qrCodeData.startsWith('data') ? `<img src="${qrCodeData}" class="img-fluid rounded" style="max-width: 250px;">` : `<h2 class="text-success">${qrCodeData}</h2>`}</div><p>BCV: ${dolarInfo.bcv} | Paralelo: ${dolarInfo.paralelo}</p><div class="d-grid gap-2"><a href="/cobranza" class="btn btn-primary">PANEL DE COBRANZA</a><a href="/marketing-panel" class="btn btn-info text-white">PANEL DE MARKETING</a><a href="/notificador-estado" class="btn btn-secondary text-white">NOTIFICADOR</a><a href="/recordatorio-estado" class="btn btn-warning text-dark">RECORDATORIOS</a></div></div></div></body></html>`);
     }
 });
 
