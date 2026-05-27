@@ -1,3 +1,5 @@
+--- START OF FILE index (25).js ---
+
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const qrcode = require('qrcode');
@@ -79,6 +81,7 @@ function normalizar(texto) {
     return texto
         .normalize("NFD")
         .replace(/[\u0300-\u036f]/g, "") 
+        // Mantenemos la 'x' intacta para medidas
         .toLowerCase()
         .trim();
 }
@@ -214,7 +217,7 @@ async function buscarCliente(rifLimpio) {
 }
 
 // ============================================================
-// LÓGICA DE BÚSQUEDA DE PRODUCTOS (SISTEMA DE RELEVANCIA)
+// ESTRATEGIA DE BÚSQUEDA TRIPLE Y MEDIDAS (CUMPLE PROMPT MAESTRO)
 // ============================================================
 async function buscarProductoPorTexto(texto) {
     const txtNormal = normalizar(texto);
@@ -253,7 +256,8 @@ async function buscarProductoPorTexto(texto) {
     let palabrasBase = [];
 
     if (esMedida) {
-        palabrasBase = [txtNormal];
+        // Para medidas, buscamos el término tal cual y también sin espacios
+        palabrasBase = [txtNormal, txtNormal.replace(/\s+/g, '')];
     } else {
         palabrasBase = txtNormal.split(' ')
             .filter(p => p.length > 2 && !stopWords.includes(p));
@@ -264,20 +268,19 @@ async function buscarProductoPorTexto(texto) {
     const stockCondition = "(cantidad_existencia + cantidad_existencia_almacen > 0)";
     
     try {
-        // Construimos una query que sume puntos por cada palabra encontrada
-        // Esto hace que el producto que más coincida salga primero, aunque no tenga todas las palabras.
+        // Construcción de consulta basada en RELEVANCIA (prioriza más coincidencias)
         let relevanceSql = "";
         let whereClause = "";
         let params = [];
 
         palabrasBase.forEach((pal, index) => {
+            // BÚSQUEDA TRIPLE: producto, descripcion y equivalencia
             relevanceSql += `(CASE WHEN producto LIKE ? OR descripcion LIKE ? OR equivalencia LIKE ? THEN 1 ELSE 0 END) + `;
             whereClause += `(producto LIKE ? OR descripcion LIKE ? OR equivalencia LIKE ?)`;
             if (index < palabrasBase.length - 1) whereClause += " OR ";
             params.push(`%${pal}%`, `%${pal}%`, `%${pal}%`);
         });
         
-        // Duplicamos los parámetros para el ORDER BY (que usa la misma lógica)
         const finalParams = [...params, ...params];
         relevanceSql = relevanceSql.slice(0, -3);
 
@@ -541,7 +544,42 @@ async function startBot() {
             const sesion = await getSesion(from);
             if (sesion && sesion.modo === 'humano' && !isAdmin) return;
 
-            // --- 1. PRIORIDAD: BÚSQUEDA DE PRODUCTOS (ABIERTO A TODOS) ---
+            // --- PRIORIDAD DE ENRUTAMIENTO (SÓLO PARA ADMINISTRADORES) ---
+            if (isAdmin) {
+                // 1. Detección de RIF (Letra+Números o $\ge$ 9 dígitos puros)
+                const esRIFPuro = /^[vjgje]?\d+$/i.test(rawText.replace(/[^a-zA-Z0-9]/g, '')) && rawText.replace(/[^a-zA-Z0-9]/g, '').length >= 9;
+                
+                if (esRIFPuro) {
+                    const rifLimpio = limpiarRIF(rawText);
+                    const c = await buscarCliente(rifLimpio);
+                    if (c) {
+                        await guardarUsuario(from, rifLimpio, c.id_cliente);
+                        const facturas = await obtenerDetalleFacturas(c.id_cliente);
+                        let totalP = 0; 
+                        let list = `⭐ *CONSULTA DE ESTADO DE CUENTA (ADMIN)*\nCliente: ${c.nombres}\nRIF: ${rifLimpio}\n\n`;
+                        if (facturas.length === 0) {
+                            list += `✅ Sin facturas pendientes.`;
+                        } else {
+                            facturas.forEach(f => {
+                                const monto = (f.total - f.abono_factura) / (f.porcentaje || 1);
+                                totalP += monto;
+                                list += `🔸 *#${f.nro_factura}* | $${monto.toFixed(2)}\n`;
+                                list += `✍️ Firmada: https://www.one4cars.com/uploads/notas/${f.nro_factura}.jpg\n\n`;
+                            });
+                            list += `💰 *TOTAL A PAGAR: $${totalP.toFixed(2)}*`;
+                        }
+                        return await safeSendMessage(from, { text: list });
+                    } else {
+                        // Solo responde error de RIF si realmente parece un RIF y no encontró nada
+                        if (rawText.length >= 9 && rawText.length <= 11) {
+                            return await safeSendMessage(from, { text: "❌ No se encontró ningún cliente con ese RIF." });
+                        }
+                    }
+                }
+            }
+
+            // --- BÚSQUEDA DE PRODUCTOS (PARA TODOS: ADMINS Y USUARIOS COMUNES) ---
+            // Se ejecuta si el usuario no es admin, o si es admin pero el texto no fue un RIF.
             if (!['hola', 'buen dia', 'buenos dias', 'menu'].includes(text)) {
                 try {
                     const prods = await buscarProductoPorTexto(rawText);
@@ -573,36 +611,7 @@ async function startBot() {
                 } catch (e) { console.log("Error en flujo de productos:", e); }
             }
 
-            // --- 2. BÚSQUEDA DE RIF (SÓLO ADMINS) ---
-            const esRIFPuro = /^[vjgje]?\d+$/i.test(rawText.replace(/[^a-zA-Z0-9]/g, '')) && rawText.replace(/[^a-zA-Z0-9]/g, '').length >= 9;
-            if (isAdmin && esRIFPuro) {
-                const rifLimpio = limpiarRIF(rawText);
-                const c = await buscarCliente(rifLimpio);
-                if (c) {
-                    await guardarUsuario(from, rifLimpio, c.id_cliente);
-                    const facturas = await obtenerDetalleFacturas(c.id_cliente);
-                    let totalP = 0; 
-                    let list = `⭐ *CONSULTA DE ESTADO DE CUENTA (ADMIN)*\nCliente: ${c.nombres}\nRIF: ${rifLimpio}\n\n`;
-                    if (facturas.length === 0) {
-                        list += `✅ Sin facturas pendientes.`;
-                    } else {
-                        facturas.forEach(f => {
-                            const monto = (f.total - f.abono_factura) / (f.porcentaje || 1);
-                            totalP += monto;
-                            list += `🔸 *#${f.nro_factura}* | $${monto.toFixed(2)}\n`;
-                            list += `✍️ Firmada: https://www.one4cars.com/uploads/notas/${f.nro_factura}.jpg\n\n`;
-                        });
-                        list += `💰 *TOTAL A PAGAR: $${totalP.toFixed(2)}*`;
-                    }
-                    return await safeSendMessage(from, { text: list });
-                } else {
-                    if (rawText.length >= 9 && rawText.length <= 11) {
-                        return await safeSendMessage(from, { text: "❌ No se encontró ningún cliente con ese RIF." });
-                    }
-                }
-            }
-
-            // --- 3. DETECCIÓN DEL MENÚ (ABIERTO A TODOS) ---
+            // --- DETECCIÓN DEL MENÚ (ABIERTO A TODOS) ---
             const menuOption = detectarIntencionMenu(text);
             if (menuOption) {
                 if (menuOption.includes('Estado de cuenta')) {
@@ -626,21 +635,21 @@ async function startBot() {
                 return await safeSendMessage(from, { text: menuOption });
             }
 
-            // --- 4. LÓGICA DE PAGOS / ABONOS (ABIERTO A TODOS) ---
+            // --- LÓGICA DE PAGOS / ABONOS (ABIERTO A TODOS) ---
             if (text === 'pago fact' || text === 'abono'  || text.includes('pago') || text.includes('al señor oscar') || text.includes('envié el pago') || text.includes('adjunto pago')) {
                 const nombreUsuario = vendedor ? vendedor.nombre : pushName;
                 const saludoCordial = `¡Hola *${nombreUsuario}*! Gracias por su mensaje. 😊\n\nRecibido tu mensaje, administración validará su pago a la brevedad.\n\n${MENU_TEXT}`;
                 return await safeSendMessage(from, { text: saludoCordial });
             }
 
-            // --- 5. LÓGICA DE FACTURA FISCAL (ABIERTO A TODOS) ---
+            // --- LÓGICA DE FACTURA FISCAL (ABIERTO A TODOS) ---
             if (text === 'factura fiscal' || text.includes('factura con iva')) {
                 const nombreUsuario = vendedor ? vendedor.nombre : pushName;
                 const saludoCordial = `¡Hola *${nombreUsuario}*! Gracias por su mensaje. 😊\n\nLa Factura Fiscal sera realizada de acuerdo con su solicitud el dia que tenga disponibilidad de hacer el pago.\n\n${MENU_TEXT}`;
                 return await safeSendMessage(from, { text: saludoCordial });
             }
 
-            // --- 6. LÓGICA DE DESPACHOS (ABIERTO A TODOS) ---
+            // --- LÓGICA DE DESPACHOS (ABIERTO A TODOS) ---
             if (text.includes("cuando llega mi pedido") || 
                 text.includes("tiempo tardan en despachar") || 
                 text.includes("cuando me llega") || 
@@ -649,7 +658,7 @@ async function startBot() {
                 return await safeSendMessage(from, { text: "Saludos estimado cliente, su pedido esta disponible en un lapso no mayor de 24 horas" });
             }
 
-            // --- 7. COMANDOS DE ADMINISTRADOR (SÓLO ADMINS) ---
+            // --- COMANDOS DE ADMINISTRADOR (SÓLO ADMINS) ---
             if (isAdmin) {
                 if (text === 'dolar' || text === 'bcv' || text === 'paralelo' ) {
                     await actualizarDolar();
@@ -660,14 +669,14 @@ async function startBot() {
                 }
             }
 
-            // --- 8. SALUDO Y MENÚ (ABIERTO A TODOS) ---
+            // --- SALUDO Y MENÚ (ABIERTO A TODOS) ---
             if (text === 'menu' || text === 'hola' || text === 'buen dia' || text === 'buenos dias') {
                 const nombreUsuario = vendedor ? vendedor.nombre : pushName;
                 const saludoCordial = `¡Hola *${nombreUsuario}*! Es un gusto saludarte. 😊\n\n¿En qué podemos ayudarte hoy? Por favor, indícanos qué servicio necesitas o consulta nuestro menú a continuación:\n\n${MENU_TEXT}`;
                 return await safeSendMessage(from, { text: saludoCordial });
             }
             
-            // --- 9. FALLBACK ---
+            // --- FALLBACK ---
             const conversationalShorts = ['si', 'no', 'ok', 'vale', 'gracias', 'ya', 'entendido', 'está bien', 'bueno', 'dale', 'está ok', 'claro'];
             if (conversationalShorts.includes(text)) return; 
             if (rawText.length > 500) return;
