@@ -247,9 +247,8 @@ async function buscarCliente(rifLimpio) {
 
 async function buscarProductoPorCodigo(codigo) {
     const codLimpio = codigo.trim();
-    const stockCondition = "(cantidad_existencia + cantidad_existencia_almacen > 0)";
     try {
-        const sql = `SELECT producto, descripcion, tipo, precio_final FROM tab_productos WHERE producto = ? AND ${stockCondition} LIMIT 1`;
+        const sql = `SELECT producto, descripcion, tipo, precio_final, (cantidad_existencia + cantidad_existencia_almacen) as stock_total FROM tab_productos WHERE producto = ? LIMIT 1`;
         const [rows] = await pool.execute(sql, [codLimpio]);
         if (rows.length > 0) return rows;
     } catch (e) {
@@ -307,13 +306,10 @@ async function buscarProductoPorTexto(texto) {
             f.push(pal + 's');
             if (pal.endsWith('z')) f.push(pal.slice(0, -1) + 'ces');
         }
-        // Corrección agregada para cruzar búsquedas entre masculino y femenino (Ej: delantero <-> delantera)
         if (pal.endsWith('a') && pal.length > 4) f.push(pal.slice(0, -1) + 'o');
         if (pal.endsWith('o') && pal.length > 4) f.push(pal.slice(0, -1) + 'a');
         return [...new Set(f)];
     };
-
-    const stockCondition = "(cantidad_existencia + cantidad_existencia_almacen > 0)";
     
     let whereClause = "";
     let queryParams = [];
@@ -327,15 +323,13 @@ async function buscarProductoPorTexto(texto) {
     });
 
     try {
-        const sql = `SELECT producto, descripcion, tipo, precio_final FROM tab_productos WHERE ${stockCondition} AND ${whereClause} LIMIT 8`;
+        const sql = `SELECT producto, descripcion, tipo, precio_final, (cantidad_existencia + cantidad_existencia_almacen) as stock_total FROM tab_productos WHERE ${whereClause} LIMIT 8`;
         const [rows] = await pool.execute(sql, queryParams);
         if (rows.length > 0) return rows;
     } catch (e) {
         console.log("Error Intento 1:", e.message);
     }
 
-    // Corrección crítica: Se exige que TODAS las palabras base coincidan (minRelevance = palabrasBase.length)
-    // Si el usuario escribe 3 palabras, debe encontrar un producto con las 3 palabras.
     let minRelevance = palabrasBase.length;
 
     const expandedTerms = [...new Set(palabrasBase.flatMap(expandirFormas))];
@@ -351,9 +345,9 @@ async function buscarProductoPorTexto(texto) {
 
     try {
         const sqlRelevancia = `
-            SELECT producto, descripcion, tipo, precio_final 
+            SELECT producto, descripcion, tipo, precio_final, (cantidad_existencia + cantidad_existencia_almacen) as stock_total 
             FROM tab_productos 
-            WHERE ${stockCondition} AND ${orConditions.join(" OR ")} 
+            WHERE ${orConditions.join(" OR ")} 
             HAVING (${relevanceSQL}) >= ? 
             ORDER BY ${relevanceSQL} DESC 
             LIMIT 8`;
@@ -727,7 +721,14 @@ async function startBot() {
                         for (const p of prods) {
                             if (!isBotReady()) break; 
                             const precioLimpio = parseFloat(p.precio_final || 0).toFixed(2);
-                            const caption = `📦 *CÓDIGO: ${p.producto}*\n💰 *Precio Final: $${precioLimpio}*\n📝 ${p.descripcion}\n🔗 Ficha: https://one4cars.com/producto_general.php?cod=${p.producto}&tipo=${encodeURIComponent(p.tipo)}`;
+                            
+                            // Lógica para estado de agotado
+                            let infoStock = "";
+                            if (parseFloat(p.stock_total || 0) <= 0) {
+                                infoStock = "\n❌ *AGOTADO (Próximo a llegar)*";
+                            }
+                            
+                            const caption = `📦 *CÓDIGO: ${p.producto}*\n💰 *Precio Final: $${precioLimpio}*${infoStock}\n📝 ${p.descripcion}\n🔗 Ficha: https://one4cars.com/producto_general.php?cod=${p.producto}&tipo=${encodeURIComponent(p.tipo)}`;
                             const imgUrl = `https://one4cars.com/imagen/${p.producto}.jpg`;
                             try {
                                 await socketBot.sendMessage(from, { image: { url: imgUrl }, caption: caption });
