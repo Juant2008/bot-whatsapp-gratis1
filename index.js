@@ -560,7 +560,7 @@ async function checkEstadisticasVendedores(force = false) {
         console.log("[ESTADISTICAS] Bot no está listo para enviar estadísticas.");
         return;
     }
-    // AQUÍ ESTÁ EL FIX: Si se fuerza, ignoramos completamente si está bloqueado
+    // Si se fuerza, ignoramos completamente si está bloqueado
     if (estadisticasEjecutando && !force) {
         console.log("[ESTADISTICAS] Omitido porque ya se encuentra en ejecución.");
         return;
@@ -586,7 +586,8 @@ async function checkEstadisticasVendedores(force = false) {
             }
         }
 
-        const [vendedores] = await pool.execute("SELECT id_vendedor, nombre, celular_vendedor, meta_ventas FROM tab_vendedores WHERE activo = 'SI' ");
+        // Filtra solo a los vendedores donde el campo 'activo' dice 'SI'
+        const [vendedores] = await pool.execute("SELECT id_vendedor, nombre, celular_vendedor, meta_ventas FROM tab_vendedores WHERE activo = 'SI'");
 
         for (const v of vendedores) {
             if (!v.celular_vendedor) continue;
@@ -698,7 +699,39 @@ async function checkEstadisticasVendedores(force = false) {
                 clientesTexto = "🔹 _Top clientes no disponible._\n";
             }
 
-            const mensajeMotivacional = `💡 *REFLEXIÓN DE ÉXITO SEMANAL:*\nRecuerda que las únicas limitaciones verdaderas son las que tú permites que vivan en tu mente. No existen mercados difíciles ni metas inalcanzables cuando vas con determinación. Esta semana, haz que cada visita cuente: no salgas solo a saludar, sal con la convicción de conectar y transformar cada oportunidad en una venta cerrada. ¡Rompe tus propios récords y demuestra tu verdadero potencial! 💪🚀`;
+            // LÓGICA DE MENSAJE MOTIVACIONAL PERSONALIZADO
+            let mensajeMotivacional = "";
+            const pctNumerico = parseFloat(porcMeta);
+
+            if (ventaMes === 0) {
+                const mensajesCero = [
+                    `💡 *REFLEXIÓN DE ÉXITO:*\nCada gran logro comienza con un primer paso. Sabemos que el mercado tiene retos, pero tu capacidad es mayor. ¡Esta semana sal a buscar ese primer cierre que cambie la racha! 💪`,
+                    `💡 *REFLEXIÓN DE ÉXITO:*\nLas oportunidades están ahí afuera esperando a quien tenga la determinación de tomarlas. Revisa tu estrategia, contacta a tus prospectos y haz que las cosas sucedan. ¡Tú puedes! 🚀`,
+                    `💡 *REFLEXIÓN DE ÉXITO:*\nUn arranque lento solo significa que estás tomando impulso. No te desanimes, cada "no" te acerca más a un "sí". ¡A romper el hielo esta semana! 🔥`
+                ];
+                mensajeMotivacional = mensajesCero[Math.floor(Math.random() * mensajesCero.length)];
+            } else if (pctNumerico < 50) {
+                const mensajesBajo = [
+                    `💡 *REFLEXIÓN DE ÉXITO:*\nVas avanzando, pero sabemos que tu potencial es para mucho más. Concéntrate en visitar a esos clientes indecisos y cerrar las ventas pendientes. ¡Sube el ritmo, la meta te espera! 🏃‍♂️💨`,
+                    `💡 *REFLEXIÓN DE ÉXITO:*\nEl éxito es la suma de pequeños esfuerzos repetidos día tras día. Estás en el camino, ahora toca acelerar. ¡Haz que cada visita cuente y mejora esos números! 📈`,
+                    `💡 *REFLEXIÓN DE ÉXITO:*\nPara alcanzar metas grandes se requiere un esfuerzo extraordinario. Revisa tus prioridades esta semana y enfócate en los cierres de mayor impacto. ¡Vamos con todo! 💥`
+                ];
+                mensajeMotivacional = mensajesBajo[Math.floor(Math.random() * mensajesBajo.length)];
+            } else if (pctNumerico >= 50 && pctNumerico < 100) {
+                const mensajesMedio = [
+                    `💡 *REFLEXIÓN DE ÉXITO:*\n¡Excelente trabajo! Ya superaste la mitad del camino. Mantén la disciplina y la energía, estás a un paso de alcanzar tu meta. ¡No bajes el ritmo ahora! 🎯👏`,
+                    `💡 *REFLEXIÓN DE ÉXITO:*\nEl esfuerzo está dando frutos y los números lo demuestran. Ahora es el momento del sprint final. ¡Asegura esos cierres y conquista tu objetivo del mes! 🚀🏆`,
+                    `💡 *REFLEXIÓN DE ÉXITO:*\n¡Qué buen ritmo llevas! Estás demostrando tu capacidad en el mercado. Mantén el enfoque en tus mejores clientes y asegura llegar al 100%. ¡Tú puedes! 💪✨`
+                ];
+                mensajeMotivacional = mensajesMedio[Math.floor(Math.random() * mensajesMedio.length)];
+            } else {
+                const mensajesAlto = [
+                    `💡 *REFLEXIÓN DE ÉXITO:*\n¡Felicidades! Has superado tu meta. Tu compromiso y habilidad para cerrar ventas son de otro nivel. Ahora el reto es contigo mismo: ¿qué tan lejos puedes llegar? 🥇🔥`,
+                    `💡 *REFLEXIÓN DE ÉXITO:*\n¡Trabajo sobresaliente! Alcanzar el 100% no es fácil, pero tú lo lograste con excelencia. Sigue brillando y demostrando por qué eres uno de los mejores. ¡A romper récords! 🌟🏆`,
+                    `💡 *REFLEXIÓN DE ÉXITO:*\n¡Meta superada! Tu dedicación se refleja en estos increíbles números. Disfruta el logro, pero no te detengas, ¡el cielo es el límite para tu talento! 🚀👑`
+                ];
+                mensajeMotivacional = mensajesAlto[Math.floor(Math.random() * mensajesAlto.length)];
+            }
 
             const msgEstadisticas = `📊 *REPORTE DE ESTADÍSTICAS DE VENTAS*\n\n` +
                 `Hola *${v.nombre}*, aquí tienes el resumen de tu rendimiento:\n\n` +
