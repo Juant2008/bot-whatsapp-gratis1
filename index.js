@@ -586,7 +586,7 @@ async function checkEstadisticasVendedores(force = false) {
             }
         }
 
-        const [vendedores] = await pool.execute("SELECT id_vendedor, nombre, celular_vendedor, meta_ventas FROM tab_vendedores");
+        const [vendedores] = await pool.execute("SELECT id_vendedor, nombre, celular_vendedor, meta_ventas FROM tab_vendedores WHERE activo = 'SI' ");
 
         for (const v of vendedores) {
             if (!v.celular_vendedor) continue;
