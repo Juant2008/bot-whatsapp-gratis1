@@ -929,7 +929,7 @@ async function startBot() {
                 if (match) itemsPedido.push({ codigo: match[1].toUpperCase(), cantidad: parseInt(match[2]) });
             }
             if (itemsPedido.length >= 2) {
-                let header = `📋 *COTIZACIÓN*\n`;
+                let header = `📋 *COTIZACIÓN DE LOS PRODUCTOS QUE HAY DISPONIBLES*\n`;
                 if (vendedor) header += `👤 Vendedor: *${vendedor.nombre}*\n`;
                 header += `┌──────────┬────────────────────────────────┬──────┬────────┬────────┐\n`;
                 header += `│ Código   │ Descripción                    │ Cant │ Precio │ Total  │\n`;
