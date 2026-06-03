@@ -261,7 +261,7 @@ async function buscarCliente(rifLimpio) {
 
 async function obtenerPorcentaje() {
     try {
-        const [r] = await pool.execute("SELECT porcentaje FROM tab_porcentajes LIMIT 1");
+        const [r] = await pool.execute("SELECT porcentaje FROM tab_porcentaje LIMIT 1");
         if (r.length > 0) return parseFloat(r[0].porcentaje) || 1;
     } catch (e) {}
     return 1;
