@@ -1129,6 +1129,21 @@ async function startBot() {
                 }
             }
 
+            // --- AGRADECIMIENTO ---
+            const gratitudeWords = ['gracias', 'agradecid', 'agardecid', 'agradecimient'];
+            if (gratitudeWords.some(w => text.includes(w))) {
+                const nombreUsuario = vendedor ? vendedor.nombre : pushName;
+                const respuestas = [
+                    `¡Ha sido un placer atenderle, *${nombreUsuario}*! Que Dios le bendiga y quede muy pendiente cualquier cosita que necesite. Aquí estamos para servirle. 🙏`,
+                    `Un honor poder ayudarle, *${nombreUsuario}*. Que tenga un excelente día y cualquier cosita no dude en escribirnos. ¡Estamos a la orden! 🙌`,
+                    `Con mucho gusto, *${nombreUsuario}*, para eso estamos. Que Dios le bendiga grandemente y quede muy pendiente. ¡Aquí tiene su casa! 🏠`,
+                    `Gracias a usted, *${nombreUsuario}*, por su confianza. Es un privilegio poder atenderle. Que pase un bendecido día. 😊🙏`,
+                    `¡De nada, *${nombreUsuario}*! Con todo el gusto del mundo. Recuerde que estamos para servirle en lo que necesite. ¡Dios le bendiga! 🌟`
+                ];
+                const respuesta = respuestas[Math.floor(Math.random() * respuestas.length)];
+                return await safeSendMessage(from, { text: respuesta });
+            }
+
             // --- 5. LÓGICA DE PRODUCTOS MEJORADA ---
             if (text !== 'menu' && !['hola', 'buen dia', 'buenos dias'].includes(text)) {
                 try {
@@ -1235,22 +1250,7 @@ async function startBot() {
                 return await safeSendMessage(from, { text: respuestas[saludoBase] });
             }
             
-            // --- 8. AGRADECIMIENTO ---
-            const gratitudeWords = ['gracias', 'agradecid', 'agardecid', 'agradecimient'];
-            if (gratitudeWords.some(w => text.includes(w))) {
-                const nombreUsuario = vendedor ? vendedor.nombre : pushName;
-                const respuestas = [
-                    `¡Ha sido un placer atenderle, *${nombreUsuario}*! Que Dios le bendiga y quede muy pendiente cualquier cosita que necesite. Aquí estamos para servirle. 🙏`,
-                    `Un honor poder ayudarle, *${nombreUsuario}*. Que tenga un excelente día y cualquier cosita no dude en escribirnos. ¡Estamos a la orden! 🙌`,
-                    `Con mucho gusto, *${nombreUsuario}*, para eso estamos. Que Dios le bendiga grandemente y quede muy pendiente. ¡Aquí tiene su casa! 🏠`,
-                    `Gracias a usted, *${nombreUsuario}*, por su confianza. Es un privilegio poder atenderle. Que pase un bendecido día. 😊🙏`,
-                    `¡De nada, *${nombreUsuario}*! Con todo el gusto del mundo. Recuerde que estamos para servirle en lo que necesite. ¡Dios le bendiga! 🌟`
-                ];
-                const respuesta = respuestas[Math.floor(Math.random() * respuestas.length)];
-                return await safeSendMessage(from, { text: respuesta });
-            }
-
-            // --- 9. FALLBACK ---
+            // --- FALLBACK ---
             const conversationalShorts = ['si', 'no', 'ok', 'vale', 'ya', 'entendido', 'bueno', 'dale', 'claro'];
             if (conversationalShorts.includes(text)) return; 
             if (rawText.length > 500) return;
