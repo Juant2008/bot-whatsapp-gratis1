@@ -99,7 +99,7 @@ const MENU_INTENTIONS = {
 
 let qrCodeData = "Iniciando...";
 let socketBot = null;
-let dolarInfo = { bcv: 'Cargando...', paralelo: 'Cargando...' };
+let dolarInfo = { bcv: 'Cargando...', paralelo: 'Cargando...', binance: 'Cargando...' };
 let notificadorInterval = null;
 const pendientesConfirmacion = new Map();
 
@@ -418,7 +418,7 @@ async function buscarProductoPorTexto(texto) {
     if (minRelevance > 1 && palabrasBase.length > 1) {
         try {
             const sqlCatchall = `SELECT producto, descripcion, tipo, precio_minimo, (cantidad_existencia + cantidad_existencia_almacen) as stock_total, cantidad_fabricando FROM tab_productos WHERE ${orConditions.join(" OR ")} HAVING (${relevanceSQL}) >= 1 ORDER BY ${relevanceSQL} DESC LIMIT 8`;
-            const [rows] = await pool.execute(sqlCatchall, [...orParams, 1]);
+            const [rows] = await pool.execute(sqlCatchall, orParams);
             if (rows.length > 0) return rows;
         } catch (e) {
             console.log("Error Intento 3:", e.message);
@@ -447,6 +447,10 @@ async function actualizarDolar() {
         if (resOficial.data) dolarInfo.bcv = parseFloat(resOficial.data.promedio).toFixed(2);
         const resParalelo = await axios.get('https://ve.dolarapi.com/v1/dolares/paralelo', { timeout: 7000 });
         if (resParalelo.data) dolarInfo.paralelo = parseFloat(resParalelo.data.promedio).toFixed(2);
+        try {
+            const resBinance = await axios.get('https://ve.dolarapi.com/v1/dolares/binance', { timeout: 7000 });
+            if (resBinance.data) dolarInfo.binance = parseFloat(resBinance.data.promedio).toFixed(2);
+        } catch (e2) {}
     } catch (e) { console.log("Error Dolar API"); }
 }
 
@@ -982,6 +986,20 @@ async function startBot() {
                 const nombreUsuario = vendedor ? vendedor.nombre : pushName;
                 const saludoCordial = `¡Hola *${nombreUsuario}*! Gracias por su mensaje. 😊\n\nLa Factura Fiscal será realizada de acuerdo con su solicitud el día que tenga disponibilidad de hacer el pago.\n\n${MENU_TEXT}`;
                 return await safeSendMessage(from, { text: saludoCordial });
+            }
+
+            // --- CONVERSIÓN DE DIVISAS ---
+            const convMatch = text.match(/^(\d+(?:\.\d+)?)\s+a\s+(bcv|paralelo|binance)$/);
+            if (convMatch) {
+                const montoUsd = parseFloat(convMatch[1]);
+                const tipo = convMatch[2];
+                const tasa = parseFloat(dolarInfo[tipo] || 0);
+                if (tasa > 0) {
+                    const totalBs = montoUsd * tasa;
+                    const nombreTasa = tipo === 'bcv' ? 'BCV' : tipo === 'paralelo' ? 'Paralelo' : 'Binance';
+                    return await safeSendMessage(from, { text: `💵 *$${montoUsd.toFixed(2)}* × *Bs.${tasa.toFixed(2)}* (${nombreTasa})\n\n🇻🇪 *Total: Bs.${totalBs.toFixed(2)}*` });
+                }
+                return await safeSendMessage(from, { text: `❌ Tasa ${tipo} no disponible. Intente más tarde.` });
             }
 
             // --- NOTA FIRMADA ---
