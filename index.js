@@ -984,6 +984,27 @@ async function startBot() {
                 return await safeSendMessage(from, { text: saludoCordial });
             }
 
+            // --- NOTA FIRMADA ---
+            const notaMatch = text.match(/^nota\s+(\d+)$/);
+            if (notaMatch) {
+                const numNota = notaMatch[1];
+                const linkNota = `https://www.one4cars.com/uploads/notas/${numNota}.jpg`;
+                try {
+                    const [f] = await pool.execute("SELECT total, porcentaje FROM tab_facturas WHERE nro_factura = ? LIMIT 1", [numNota]);
+                    if (f.length > 0) {
+                        const total = parseFloat(f[0].total || 0);
+                        const pct = parseFloat(f[0].porcentaje) || 1;
+                        const bcv = parseFloat(dolarInfo?.bcv || 0);
+                        const monto = bcv > 0 ? (total / pct) * bcv : 0;
+                        let msg = `✍️ *Factura Firmada #${numNota}*\n💵 Total USD: $${(total / pct).toFixed(2)}\n`;
+                        if (bcv > 0) msg += `🇻🇪 Total Bs: Bs.${monto.toFixed(2)} (tasa BCV: Bs.${bcv.toFixed(2)})`;
+                        msg += `\n\n🔗 Ver imagen: ${linkNota}`;
+                        return await safeSendMessage(from, { text: msg });
+                    }
+                } catch (e) { console.log("[NOTA] Error:", e.message); }
+                return await safeSendMessage(from, { text: `✍️ *Factura Firmada #${numNota}*\n\n🔗 Ver imagen: ${linkNota}` });
+            }
+
             // --- 4. COTIZACIÓN AUTOMÁTICA (MULTILÍNEA) ---
             const lineas = rawText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
             const itemsPedido = [];
@@ -1038,6 +1059,14 @@ async function startBot() {
                     itemsOk.push({ codigo: p.producto, tipo: p.tipo, cantidad: item.cantidad, precio: parseFloat(p.precio_minimo || 0) / pct });
                 }
                 if (itemsOk.length > 0) {
+                    const nomCliente = vendedor?.nombre || pushName || 'estimado';
+                    const saludoCoti = [
+                        `¡Hola *${nomCliente}*! Gracias por su consulta. Aquí tiene la cotización solicitada: 👇`,
+                        `Saludos *${nomCliente}*, con gusto le cotizamos. Aquí está el detalle: 👇`,
+                        `Buen día *${nomCliente}*, gracias por escribirnos. Le enviamos la cotización: 👇`
+                    ][Math.floor(Math.random() * 3)];
+                    await safeSendMessage(from, { text: saludoCoti });
+                    await sleep(800);
                     let gt = 0;
                     let msg = `📋 *COTIZACIÓN*\n`;
                     if (vendedor) msg += `👤 Vendedor: *${vendedor.nombre}*\n\n`;
@@ -1165,27 +1194,6 @@ async function startBot() {
                     await actualizarDolar();
                     return await safeSendMessage(from, { text: `💵 BCV: ${dolarInfo.bcv}\n📈 Paralelo: ${dolarInfo.paralelo}` });
                 }
-            }
-
-            // --- NOTA FIRMADA (todos los usuarios) ---
-            const notaMatch = text.match(/nota\s+(\d+)/);
-            if (notaMatch) {
-                const numNota = notaMatch[1];
-                const linkNota = `https://www.one4cars.com/uploads/notas/${numNota}.jpg`;
-                try {
-                    const [f] = await pool.execute("SELECT total, porcentaje FROM tab_facturas WHERE nro_factura = ? LIMIT 1", [numNota]);
-                    if (f.length > 0) {
-                        const total = parseFloat(f[0].total || 0);
-                        const pct = parseFloat(f[0].porcentaje) || 1;
-                        const bcv = parseFloat(dolarInfo?.bcv || 0);
-                        const monto = bcv > 0 ? (total / pct) * bcv : 0;
-                        let msg = `✍️ *Factura Firmada #${numNota}*\n💵 Total USD: $${(total / pct).toFixed(2)}\n`;
-                        if (bcv > 0) msg += `🇻🇪 Total Bs: Bs.${monto.toFixed(2)} (tasa BCV: Bs.${bcv.toFixed(2)})`;
-                        msg += `\n\n🔗 Ver imagen: ${linkNota}`;
-                        return await safeSendMessage(from, { text: msg });
-                    }
-                } catch (e) { console.log("[NOTA] Error:", e.message); }
-                return await safeSendMessage(from, { text: `✍️ *Factura Firmada #${numNota}*\n\n🔗 Ver imagen: ${linkNota}` });
             }
 
             // --- TOP 10 MÁS VENDIDOS ---
