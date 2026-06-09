@@ -852,7 +852,7 @@ async function startBot() {
             socketBot = null;
         }
 
-        const { state, saveCreds } = await useMultiFileAuthState('auth_info');
+        const { state, saveCreds } = await useMultiFileAuthState('auth_info_v2');
         const { version } = await fetchLatestBaileysVersion();
 
         const sock = makeWASocket({
