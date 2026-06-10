@@ -99,7 +99,7 @@ const MENU_INTENTIONS = {
 
 let qrCodeData = "Iniciando...";
 let socketBot = null;
-let dolarInfo = { bcv: 'Cargando...', paralelo: 'Cargando...', binance: 'Cargando...' };
+let dolarInfo = { bcv: 'Cargando...', paralelo: 'Cargando...' };
 let notificadorInterval = null;
 const pendientesConfirmacion = new Map();
 
@@ -262,14 +262,8 @@ async function buscarCliente(rifLimpio) {
 async function obtenerPorcentaje() {
     try {
         const [r] = await pool.execute("SELECT porcentaje FROM tab_porcentaje LIMIT 1");
-        if (r.length > 0) {
-            console.log("[PORCENTAJE] Valor obtenido:", r[0].porcentaje);
-            return parseFloat(r[0].porcentaje) || 1;
-        }
-        console.log("[PORCENTAJE] tabla vacia, se usara 1");
-    } catch (e) {
-        console.log("[PORCENTAJE] Error consultando tab_porcentajes:", e.message);
-    }
+        if (r.length > 0) return parseFloat(r[0].porcentaje) || 1;
+    } catch (e) {}
     return 1;
 }
 
@@ -370,7 +364,7 @@ async function buscarProductoPorTexto(texto) {
 
     palabrasBase.forEach((pal, index) => {
         const formas = expandirFormas(pal);
-        const conditions = formas.map(() => "descripcion LIKE ? COLLATE utf8_spanish_ci");
+        const conditions = formas.map(() => "descripcion LIKE ?");
         whereClause += `(${conditions.join(" OR ")})`;
         if (index < palabrasBase.length - 1) whereClause += " AND ";
         formas.forEach(f => queryParams.push(`%${f}%`));
@@ -390,12 +384,12 @@ async function buscarProductoPorTexto(texto) {
     }
 
     const expandedTerms = [...new Set(palabrasBase.flatMap(expandirFormas))];
-    const orConditions = expandedTerms.map(() => "descripcion LIKE ? COLLATE utf8_spanish_ci");
+    const orConditions = expandedTerms.map(() => "descripcion LIKE ?");
     const orParams = expandedTerms.map(p => `%${p}%`);
 
     const relevanceParts = palabrasBase.map(p => {
         const formas = expandirFormas(p);
-        const cases = formas.map(f => `descripcion LIKE '%${f.replace(/[^a-z]/g, '')}%' COLLATE utf8_spanish_ci`);
+        const cases = formas.map(f => `descripcion LIKE '%${f.replace(/[^a-z]/g, '')}%'`);
         return `(CASE WHEN ${cases.join(' OR ')} THEN 1 ELSE 0 END)`;
     });
     const relevanceSQL = relevanceParts.join(' + ');
@@ -418,7 +412,7 @@ async function buscarProductoPorTexto(texto) {
     if (minRelevance > 1 && palabrasBase.length > 1) {
         try {
             const sqlCatchall = `SELECT producto, descripcion, tipo, precio_minimo, (cantidad_existencia + cantidad_existencia_almacen) as stock_total, cantidad_fabricando FROM tab_productos WHERE ${orConditions.join(" OR ")} HAVING (${relevanceSQL}) >= 1 ORDER BY ${relevanceSQL} DESC LIMIT 8`;
-            const [rows] = await pool.execute(sqlCatchall, orParams);
+            const [rows] = await pool.execute(sqlCatchall, [...orParams, 1]);
             if (rows.length > 0) return rows;
         } catch (e) {
             console.log("Error Intento 3:", e.message);
@@ -447,10 +441,6 @@ async function actualizarDolar() {
         if (resOficial.data) dolarInfo.bcv = parseFloat(resOficial.data.promedio).toFixed(2);
         const resParalelo = await axios.get('https://ve.dolarapi.com/v1/dolares/paralelo', { timeout: 7000 });
         if (resParalelo.data) dolarInfo.paralelo = parseFloat(resParalelo.data.promedio).toFixed(2);
-        try {
-            const resBinance = await axios.get('https://ve.dolarapi.com/v1/dolares/binance', { timeout: 7000 });
-            if (resBinance.data) dolarInfo.binance = parseFloat(resBinance.data.promedio).toFixed(2);
-        } catch (e2) {}
     } catch (e) { console.log("Error Dolar API"); }
 }
 
@@ -988,41 +978,6 @@ async function startBot() {
                 return await safeSendMessage(from, { text: saludoCordial });
             }
 
-            // --- CONVERSIÓN DE DIVISAS ---
-            const convMatch = text.match(/^(\d+(?:\.\d+)?)\s+a\s+(bcv|paralelo|binance)$/);
-            if (convMatch) {
-                const montoUsd = parseFloat(convMatch[1]);
-                const tipo = convMatch[2];
-                const tasa = parseFloat(dolarInfo[tipo] || 0);
-                if (tasa > 0) {
-                    const totalBs = montoUsd * tasa;
-                    const nombreTasa = tipo === 'bcv' ? 'BCV' : tipo === 'paralelo' ? 'Paralelo' : 'Binance';
-                    return await safeSendMessage(from, { text: `💵 *$${montoUsd.toFixed(2)}* × *Bs.${tasa.toFixed(2)}* (${nombreTasa})\n\n🇻🇪 *Total: Bs.${totalBs.toFixed(2)}*` });
-                }
-                return await safeSendMessage(from, { text: `❌ Tasa ${tipo} no disponible. Intente más tarde.` });
-            }
-
-            // --- NOTA FIRMADA ---
-            const notaMatch = text.match(/^nota\s+(\d+)$/);
-            if (notaMatch) {
-                const numNota = notaMatch[1];
-                const linkNota = `https://www.one4cars.com/uploads/notas/${numNota}.jpg`;
-                try {
-                    const [f] = await pool.execute("SELECT total, porcentaje FROM tab_facturas WHERE nro_factura = ? LIMIT 1", [numNota]);
-                    if (f.length > 0) {
-                        const total = parseFloat(f[0].total || 0);
-                        const pct = parseFloat(f[0].porcentaje) || 1;
-                        const bcv = parseFloat(dolarInfo?.bcv || 0);
-                        const monto = bcv > 0 ? (total / pct) * bcv : 0;
-                        let msg = `✍️ *Factura Firmada #${numNota}*\n💵 Total USD: $${(total / pct).toFixed(2)}\n`;
-                        if (bcv > 0) msg += `🇻🇪 Total Bs: Bs.${monto.toFixed(2)} (tasa BCV: Bs.${bcv.toFixed(2)})`;
-                        msg += `\n\n🔗 Ver imagen: ${linkNota}`;
-                        return await safeSendMessage(from, { text: msg });
-                    }
-                } catch (e) { console.log("[NOTA] Error:", e.message); }
-                return await safeSendMessage(from, { text: `✍️ *Factura Firmada #${numNota}*\n\n🔗 Ver imagen: ${linkNota}` });
-            }
-
             // --- 4. COTIZACIÓN AUTOMÁTICA (MULTILÍNEA) ---
             const lineas = rawText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
             const itemsPedido = [];
@@ -1077,14 +1032,6 @@ async function startBot() {
                     itemsOk.push({ codigo: p.producto, tipo: p.tipo, cantidad: item.cantidad, precio: parseFloat(p.precio_minimo || 0) / pct });
                 }
                 if (itemsOk.length > 0) {
-                    const nomCliente = vendedor?.nombre || pushName || 'estimado';
-                    const saludoCoti = [
-                        `¡Hola *${nomCliente}*! Gracias por su consulta. Aquí tiene la cotización solicitada: 👇`,
-                        `Saludos *${nomCliente}*, con gusto le cotizamos. Aquí está el detalle: 👇`,
-                        `Buen día *${nomCliente}*, gracias por escribirnos. Le enviamos la cotización: 👇`
-                    ][Math.floor(Math.random() * 3)];
-                    await safeSendMessage(from, { text: saludoCoti });
-                    await sleep(800);
                     let gt = 0;
                     let msg = `📋 *COTIZACIÓN*\n`;
                     if (vendedor) msg += `👤 Vendedor: *${vendedor.nombre}*\n\n`;
@@ -1145,21 +1092,6 @@ async function startBot() {
                     await safeSendMessage(from, { text: "❌ Pedido cancelado." });
                     return;
                 }
-            }
-
-            // --- AGRADECIMIENTO ---
-            const gratitudeWords = ['gracias', 'agradecid', 'agardecid', 'agradecimient'];
-            if (gratitudeWords.some(w => text.includes(w))) {
-                const nombreUsuario = vendedor ? vendedor.nombre : pushName;
-                const respuestas = [
-                    `¡Ha sido un placer atenderle, *${nombreUsuario}*! Que Dios le bendiga y quede muy pendiente cualquier cosita que necesite. Aquí estamos para servirle. 🙏`,
-                    `Un honor poder ayudarle, *${nombreUsuario}*. Que tenga un excelente día y cualquier cosita no dude en escribirnos. ¡Estamos a la orden! 🙌`,
-                    `Con mucho gusto, *${nombreUsuario}*, para eso estamos. Que Dios le bendiga grandemente y quede muy pendiente. ¡Aquí tiene su casa! 🏠`,
-                    `Gracias a usted, *${nombreUsuario}*, por su confianza. Es un privilegio poder atenderle. Que pase un bendecido día. 😊🙏`,
-                    `¡De nada, *${nombreUsuario}*! Con todo el gusto del mundo. Recuerde que estamos para servirle en lo que necesite. ¡Dios le bendiga! 🌟`
-                ];
-                const respuesta = respuestas[Math.floor(Math.random() * respuestas.length)];
-                return await safeSendMessage(from, { text: respuesta });
             }
 
             // --- 5. LÓGICA DE PRODUCTOS MEJORADA ---
@@ -1223,6 +1155,13 @@ async function startBot() {
 
             // --- 6. COMANDOS DE ADMINISTRADOR ---
             if (isAdmin) {
+                const notaMatch = text.match(/nota\s+(\d+)/);
+                if (notaMatch) {
+                    const numNota = notaMatch[1];
+                    const linkNota = `https://www.one4cars.com/uploads/notas/${numNota}.jpg`;
+                    return await safeSendMessage(from, { text: `✍️ *Factura Firmada #${numNota}*\n\nPuede ver la imagen aquí:\n${linkNota}` });
+                }
+
                 if (text === 'dolar' || text === 'bcv' || text === 'paralelo' ) {
                     await actualizarDolar();
                     return await safeSendMessage(from, { text: `💵 BCV: ${dolarInfo.bcv}\n📈 Paralelo: ${dolarInfo.paralelo}` });
@@ -1268,7 +1207,22 @@ async function startBot() {
                 return await safeSendMessage(from, { text: respuestas[saludoBase] });
             }
             
-            // --- FALLBACK ---
+            // --- 8. AGRADECIMIENTO ---
+            const gratitudeWords = ['gracias', 'agradecid', 'agardecid', 'agradecimient'];
+            if (gratitudeWords.some(w => text.includes(w))) {
+                const nombreUsuario = vendedor ? vendedor.nombre : pushName;
+                const respuestas = [
+                    `¡Ha sido un placer atenderle, *${nombreUsuario}*! Que Dios le bendiga y quede muy pendiente cualquier cosita que necesite. Aquí estamos para servirle. 🙏`,
+                    `Un honor poder ayudarle, *${nombreUsuario}*. Que tenga un excelente día y cualquier cosita no dude en escribirnos. ¡Estamos a la orden! 🙌`,
+                    `Con mucho gusto, *${nombreUsuario}*, para eso estamos. Que Dios le bendiga grandemente y quede muy pendiente. ¡Aquí tiene su casa! 🏠`,
+                    `Gracias a usted, *${nombreUsuario}*, por su confianza. Es un privilegio poder atenderle. Que pase un bendecido día. 😊🙏`,
+                    `¡De nada, *${nombreUsuario}*! Con todo el gusto del mundo. Recuerde que estamos para servirle en lo que necesite. ¡Dios le bendiga! 🌟`
+                ];
+                const respuesta = respuestas[Math.floor(Math.random() * respuestas.length)];
+                return await safeSendMessage(from, { text: respuesta });
+            }
+
+            // --- 9. FALLBACK ---
             const conversationalShorts = ['si', 'no', 'ok', 'vale', 'ya', 'entendido', 'bueno', 'dale', 'claro'];
             if (conversationalShorts.includes(text)) return; 
             if (rawText.length > 500) return;
