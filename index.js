@@ -102,6 +102,7 @@ let socketBot = null;
 let dolarInfo = { bcv: 'Cargando...', paralelo: 'Cargando...', binance: 'Cargando...' };
 let notificadorInterval = null;
 const pendientesConfirmacion = new Map();
+const sentMsgIds = new Set();
 
 // ===== FUNCIONES DE APOYO =====
 
@@ -125,7 +126,11 @@ function soloNumerosRIF(texto) {
 async function safeSendMessage(jid, content) {
     try {
         if (!socketBot) throw new Error("Socket no inicializado");
-        await socketBot.sendMessage(jid, content);
+        const result = await socketBot.sendMessage(jid, content);
+        if (result?.key?.id) {
+            sentMsgIds.add(result.key.id);
+            setTimeout(() => sentMsgIds.delete(result.key.id), 60000);
+        }
         console.log(`[MSG] ✅ Mensaje enviado a ${jid}`);
     } catch (e) {
         console.log(`[MSG] ❌ Error enviando mensaje:`, e.message);
@@ -895,23 +900,14 @@ async function startBot() {
             const msg = messages[0];
             if (!msg.message) return;
 
+            // Ignorar mensajes enviados por el bot (evita bucles)
+            if (msg.key.fromMe || (msg.key.id && sentMsgIds.has(msg.key.id))) return;
+
             const from = msg.key.remoteJid;
             if (from === 'status@broadcast' || from.includes('@g.us')) return;
 
             const isAdmin = ADMIN_IDS.some(id => from.includes(id));
             const vendedor = await buscarVendedor(from, msg.pushName || "Vendedor");
-
-            if (msg.key.fromMe) {
-                const textMe = (msg.message.conversation || msg.message.extendedTextMessage?.text || "").toLowerCase();
-                if (textMe === '!bot') {
-                    await setModo(from, 'bot');
-                    await safeSendMessage(from, { text: "🤖 Bot reactivado para este chat." });
-                } else {
-                    await setModo(from, 'humano');
-                }
-                return;
-            }
-
             const pushName = msg.pushName || "Usuario";
             const rawText = (msg.message.conversation || msg.message.extendedTextMessage?.text || "").trim();
             if (!rawText) return;
