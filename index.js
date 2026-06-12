@@ -35,7 +35,7 @@ const pool = mysql.createPool({
     host: 'one4cars.com',
     user: 'juant200_one4car',
     password: 'Notieneclave1*',
-    database: 'juant200_venezon',
+    database: 'juant200_bot_clientes',
     waitForConnections: true,
     connectionLimit: 10,
     queueLimit: 0
