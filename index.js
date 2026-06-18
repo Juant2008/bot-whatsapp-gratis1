@@ -264,8 +264,14 @@ async function buscarCliente(rifLimpio) {
 async function obtenerPorcentaje() {
     try {
         const [r] = await pool.execute("SELECT porcentaje FROM tab_porcentaje LIMIT 1");
-        if (r.length > 0) return parseFloat(r[0].porcentaje) || 1;
-    } catch (e) {}
+        if (r.length > 0) {
+            console.log("[PORCENTAJE] Valor obtenido:", r[0].porcentaje);
+            return parseFloat(r[0].porcentaje) || 1;
+        }
+        console.log("[PORCENTAJE] tabla vacia, se usara 1");
+    } catch (e) {
+        console.log("[PORCENTAJE] Error consultando tab_porcentajes:", e.message);
+    }
     return 1;
 }
 
@@ -1156,17 +1162,31 @@ async function startBot() {
 
             // --- 6. COMANDOS DE ADMINISTRADOR ---
             if (isAdmin) {
-                const notaMatch = text.match(/nota\s+(\d+)/);
-                if (notaMatch) {
-                    const numNota = notaMatch[1];
-                    const linkNota = `https://www.one4cars.com/uploads/notas/${numNota}.jpg`;
-                    return await safeSendMessage(from, { text: `✍️ *Factura Firmada #${numNota}*\n\nPuede ver la imagen aquí:\n${linkNota}` });
-                }
-
                 if (text === 'dolar' || text === 'bcv' || text === 'paralelo' ) {
                     await actualizarDolar();
                     return await safeSendMessage(from, { text: `💵 BCV: ${dolarInfo.bcv}\n📈 Paralelo: ${dolarInfo.paralelo}` });
                 }
+            }
+
+            // --- NOTA FIRMADA (todos los usuarios) ---
+            const notaMatch = text.match(/nota\s+(\d+)/);
+            if (notaMatch) {
+                const numNota = notaMatch[1];
+                const linkNota = `https://www.one4cars.com/uploads/notas/${numNota}.jpg`;
+                try {
+                    const [f] = await pool.execute("SELECT total, porcentaje FROM tab_facturas WHERE nro_factura = ? LIMIT 1", [numNota]);
+                    if (f.length > 0) {
+                        const total = parseFloat(f[0].total || 0);
+                        const pct = parseFloat(f[0].porcentaje) || 1;
+                        const bcv = parseFloat(dolarInfo?.bcv || 0);
+                        const monto = bcv > 0 ? (total / pct) * bcv : 0;
+                        let msg = `✍️ *Factura Firmada #${numNota}*\n💵 Total USD: $${(total / pct).toFixed(2)}\n`;
+                        if (bcv > 0) msg += `🇻🇪 Total Bs: Bs.${monto.toFixed(2)} (tasa BCV: Bs.${bcv.toFixed(2)})`;
+                        msg += `\n\n🔗 Ver imagen: ${linkNota}`;
+                        return await safeSendMessage(from, { text: msg });
+                    }
+                } catch (e) { console.log("[NOTA] Error:", e.message); }
+                return await safeSendMessage(from, { text: `✍️ *Factura Firmada #${numNota}*\n\n🔗 Ver imagen: ${linkNota}` });
             }
 
             // --- TOP 10 MÁS VENDIDOS ---
