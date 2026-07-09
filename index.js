@@ -38,7 +38,7 @@ const pool = mysql.createPool({
     waitForConnections: true,
     connectionLimit: 10,
     queueLimit: 0,
-    charset: 'utf8_spanish_ci'
+    charset: 'UTF8_SPANISH_CI'
 });
 const poolLocal = mysql.createPool({
     host: 'localhost',
@@ -48,7 +48,7 @@ const poolLocal = mysql.createPool({
     waitForConnections: true,
     connectionLimit: 5,
     queueLimit: 0,
-    charset: 'utf8_spanish_ci'
+    charset: 'UTF8_SPANISH_CI'
 });
 const dualExecute = async (sql, params) => {
     const r = await pool.execute(sql, params);
@@ -637,7 +637,18 @@ async function buscarClientePorNombreYVendedor(nombreCliente, nombreVendedor) {
             "SELECT id_cliente, nombres, cedula, celular, telefono, direccion, zona, clave as rif, vendedor FROM tab_clientes WHERE vendedor LIKE ? AND nombres LIKE ? AND activo = 'si' LIMIT 1",
             [`%${nombreVendedor}%`, `%${nombreCliente}%`]
         );
-        return r2[0] || null;
+        if (r2[0]) return r2[0];
+        // Fallback: buscar sin filtro activo
+        const [r3] = await pool.execute(
+            "SELECT id_cliente, nombres, cedula, celular, telefono, direccion, zona, clave as rif, vendedor FROM tab_clientes WHERE vendedor = ? AND nombres LIKE ? LIMIT 1",
+            [nombreVendedor, `%${nombreCliente}%`]
+        );
+        if (r3[0]) return r3[0];
+        const [r4] = await pool.execute(
+            "SELECT id_cliente, nombres, cedula, celular, telefono, direccion, zona, clave as rif, vendedor FROM tab_clientes WHERE vendedor LIKE ? AND nombres LIKE ? LIMIT 1",
+            [`%${nombreVendedor}%`, `%${nombreCliente}%`]
+        );
+        return r4[0] || null;
     } catch (e) { console.log("[BUSCAR_CLIENTE] Error en buscarClientePorNombreYVendedor:", e.sqlMessage || e.message); return null; }
 }
 
@@ -696,7 +707,14 @@ async function buscarClientePorPalabras(palabras, nombreVendedor, textoOriginal)
              FROM tab_clientes WHERE (${conditions}) AND activo = 'si' LIMIT 1`,
             params5
         );
-        return r5[0] || null;
+        if (r5[0]) return r5[0];
+        // Fallback final: buscar sin filtro activo
+        const [r6] = await pool.execute(
+            `SELECT id_cliente, nombres, cedula, celular, telefono, direccion, zona, clave as rif, vendedor
+             FROM tab_clientes WHERE (${conditions}) LIMIT 1`,
+            params5
+        );
+        return r6[0] || null;
     } catch (e) { console.log("[BUSCAR_CLIENTE] Error en buscarClientePorPalabras:", e.sqlMessage || e.message); return null; }
 }
 
