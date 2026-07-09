@@ -2770,7 +2770,7 @@ Mientras tanto, puede consultar el detalle de sus facturas pendientes aquí:
             }
 
             // --- 9. FALLBACK (respuesta para mensajes no reconocidos) ---
-            const conversationalShorts = ['si', 'no', 'ok', 'vale', 'ya', 'entendido', 'bueno', 'dale', 'claro'];
+            const conversationalShorts = ['si', 'no', 'ok', 'vale', 'ya', 'entendido', 'bueno', 'dale', 'claro', 'estoy atento', 'estoy atenta', 'estoy pendiente', 'okey', 'te aviso', 'te estoy avisando', 'no mi pana', 'mi pana', 'mi amigo', 'estamos en contacto'];
             if (conversationalShorts.includes(text)) return; 
             if (rawText.length > 500) return;
 
