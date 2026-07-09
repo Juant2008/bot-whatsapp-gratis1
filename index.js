@@ -2061,7 +2061,15 @@ Mientras tanto, puede consultar el detalle de sus facturas pendientes aquí:
                     return;
                 }
                 const itemsTemp = itemsPedido.map(it => `${it.codigo} ${it.cantidad}`).join(', ');
-                await setSesionDatos(from, { tipo: 'esperando_cliente', itemsPedido: itemsPedido, pushName: pushName, vendedor: vendedor ? { id_vendedor: vendedor.id_vendedor, nombre: vendedor.nombre, celular_vendedor: vendedor.celular_vendedor } : null });
+                let vendedorSingle = vendedor ? { id_vendedor: vendedor.id_vendedor, nombre: vendedor.nombre, celular_vendedor: vendedor.celular_vendedor } : null;
+                if (vendedor && vendedor.nombre.trim().toUpperCase() === 'OFICINA' && pushName) {
+                    const pn = normalizar(pushName);
+                    const nombresOf = ['juan', 'juan trujillo', 'jose cabral'];
+                    if (nombresOf.some(n => pn === n || pn.startsWith(n))) {
+                        vendedorSingle.subVendedor = pushName;
+                    }
+                }
+                await setSesionDatos(from, { tipo: 'esperando_cliente', itemsPedido: itemsPedido, pushName: pushName, vendedor: vendedorSingle });
                 await setModo(from, 'esperando_cliente');
                 await safeSendMessage(from, { text: `🔍 *Detecté un pedido de ${itemsPedido.length} producto(s):*\n${itemsTemp}\n\n❓ *¿Para qué cliente es este pedido?*\nEscriba el nombre o razón social del cliente.` });
                 return;
@@ -2084,40 +2092,59 @@ Mientras tanto, puede consultar el detalle de sus facturas pendientes aquí:
                     await safeSendMessage(from, { text: "❌ Por favor escriba un nombre de vendedor válido (mínimo 3 caracteres)." });
                     return;
                 }
-                const [rows] = await pool.execute(
-                    "SELECT id_vendedor, nombre, celular_vendedor FROM tab_vendedores WHERE activo = 'SI' AND nombre LIKE ? LIMIT 1",
-                    [`%${nombreVendedor}%`]
-                );
-                if (rows.length === 0) {
-                    await safeSendMessage(from, { text: `❌ No encontré un vendedor llamado "*${nombreVendedor}*" en la base de datos.\n\nPuede que no esté registrado como activo. Contacte a un administrador o escriba otro nombre.\n\nEscriba *cancelar* para cancelar el pedido.` });
-                    return;
+                // Detectar vendedores de oficina (Juan, Juan Trujillo, Jose Cabral)
+                const nombreNorm = normalizar(nombreVendedor);
+                const nombresOficina = ['juan', 'juan trujillo', 'jose cabral'];
+                const esOficina = nombresOficina.some(n => nombreNorm === n || nombreNorm.startsWith(n));
+                let vendedorEncontrado = null;
+                let subVendedor = null;
+                if (esOficina) {
+                    const [rowOf] = await pool.execute(
+                        "SELECT id_vendedor, nombre, celular_vendedor FROM tab_vendedores WHERE activo = 'SI' AND nombre = 'OFICINA' LIMIT 1"
+                    );
+                    if (rowOf.length > 0) {
+                        vendedorEncontrado = rowOf[0];
+                        subVendedor = nombreVendedor;
+                    }
                 }
-                const vendedorEncontrado = rows[0];
+                if (!vendedorEncontrado) {
+                    const [rows] = await pool.execute(
+                        "SELECT id_vendedor, nombre, celular_vendedor FROM tab_vendedores WHERE activo = 'SI' AND nombre LIKE ? LIMIT 1",
+                        [`%${nombreVendedor}%`]
+                    );
+                    if (rows.length === 0) {
+                        await safeSendMessage(from, { text: `❌ No encontré un vendedor llamado "*${nombreVendedor}*" en la base de datos.\n\nPuede que no esté registrado como activo. Contacte a un administrador o escriba otro nombre.\n\nEscriba *cancelar* para cancelar el pedido.` });
+                        return;
+                    }
+                    vendedorEncontrado = rows[0];
+                }
                 if (tipo === 'multi') {
                     const multiOrder = {
                         items: datosSesion.items,
                         currentIndex: 0,
                         resolvedItems: [],
                         pct: null,
-                        vendedor: vendedorEncontrado,
+                        vendedor: { ...vendedorEncontrado, subVendedor },
                         pushName: datosSesion.pushName || pushName
                     };
                     multiItemOrders.set(from, multiOrder);
                     await clearSesionDatos(from);
                     await setModo(from, 'bot');
-                    await safeSendMessage(from, { text: `✅ Vendedor identificado: *${vendedorEncontrado.nombre}*. Procesando su pedido...` });
+                    const nombreV = subVendedor || vendedorEncontrado.nombre;
+                    await safeSendMessage(from, { text: `✅ Vendedor identificado: *${nombreV}*. Procesando su pedido...` });
                     await processNextMultiItem(from, multiOrder);
                     return;
                 } else {
+                    const nombreVend = subVendedor || vendedorEncontrado.nombre;
                     await setSesionDatos(from, {
                         tipo: 'esperando_cliente',
                         itemsPedido: datosSesion.itemsPedido,
                         pushName: datosSesion.pushName,
-                        vendedor: { id_vendedor: vendedorEncontrado.id_vendedor, nombre: vendedorEncontrado.nombre, celular_vendedor: vendedorEncontrado.celular_vendedor }
+                        vendedor: { id_vendedor: vendedorEncontrado.id_vendedor, nombre: nombreVend, celular_vendedor: vendedorEncontrado.celular_vendedor, subVendedor }
                     });
                     await setModo(from, 'esperando_cliente');
                     const itemsTemp = datosSesion.itemsPedido.map(it => `${it.codigo} ${it.cantidad}`).join(', ');
-                    await safeSendMessage(from, { text: `✅ Vendedor: *${vendedorEncontrado.nombre}*\n\n🔍 *Pedido de ${datosSesion.itemsPedido.length} producto(s):*\n${itemsTemp}\n\n❓ *¿Para qué cliente es este pedido?*\nEscriba el nombre o razón social del cliente.` });
+                    await safeSendMessage(from, { text: `✅ Vendedor: *${nombreVend}*\n\n🔍 *Pedido de ${datosSesion.itemsPedido.length} producto(s):*\n${itemsTemp}\n\n❓ *¿Para qué cliente es este pedido?*\nEscriba el nombre o razón social del cliente.` });
                     return;
                 }
             }
@@ -2338,16 +2365,18 @@ Mientras tanto, puede consultar el detalle de sus facturas pendientes aquí:
                             ? (data.vendedor?.celular_vendedor || `LID:${rawTel}`)
                             : rawTel;
                         const tot = data.items.reduce((s, it) => s + it.precio * it.cantidad, 0);
-                        await pool.execute("INSERT INTO tab_pedidos (nro_factura, fecha_reg, nombres, celular, total, id_vendedor, vendedor, celular_vendedor, pagada, anulado) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'NO', 'no')",
-                            [nro, hoy, data.cliente?.nombres || data.pushName || 'Cliente', tel, tot, data.vendedor?.id_vendedor || 0, data.vendedor?.nombre || '', data.vendedor?.celular_vendedor || '']);
+                        const nombreVendedorFinal = data.vendedor?.subVendedor || data.vendedor?.nombre || '';
+                        await pool.execute("INSERT INTO tab_pedidos (nro_factura, fecha_reg, nombres, celular, total, id_vendedor, vendedor, sub_vendedor, celular_vendedor, pagada, anulado) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'NO', 'no')",
+                            [nro, hoy, data.cliente?.nombres || data.pushName || 'Cliente', tel, tot, data.vendedor?.id_vendedor || 0, nombreVendedorFinal, data.vendedor?.subVendedor || null, data.vendedor?.celular_vendedor || '']);
                         const [pedido] = await pool.execute("SELECT MAX(id_factura) as id FROM tab_pedidos");
                         const idPed = pedido[0].id;
                         const ahora = new Date().toISOString().slice(0, 19).replace('T', ' ');
                         console.log("[ORDEN] Insertando orden, cliente:", data.cliente?.nombres || data.pushName, "total:", tot, "vendedor:", data.vendedor?.nombre);
                         try {
+                            const comentariosOrden = data.vendedor?.subVendedor ? `Vendedor: ${data.vendedor.subVendedor}` : '';
                             const [ordenResult] = await pool.execute(
-                                "INSERT INTO orden (customer_id, cedula, nombres, direccion, celular, id_vendedor, vendedor, total_price, created, modified, status, facturado, pendiente, forma_de_pago, facturar, comentarios) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '1', 'NO', 'NO', '', '', '')",
-                                [data.cliente?.id_cliente || 0, data.cliente?.cedula || '', data.cliente?.nombres || data.pushName || 'Cliente', data.cliente?.direccion || '', tel, data.vendedor?.id_vendedor || 0, data.vendedor?.nombre || '', tot, ahora, ahora]
+                                "INSERT INTO orden (customer_id, cedula, nombres, direccion, celular, id_vendedor, vendedor, total_price, created, modified, status, facturado, pendiente, forma_de_pago, facturar, comentarios) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '1', 'NO', 'NO', '', '', ?)",
+                                [data.cliente?.id_cliente || 0, data.cliente?.cedula || '', data.cliente?.nombres || data.pushName || 'Cliente', data.cliente?.direccion || '', tel, data.vendedor?.id_vendedor || 0, nombreVendedorFinal, tot, ahora, ahora, comentariosOrden]
                             );
                             const ordenId = ordenResult.insertId;
                             console.log("[ORDEN] OK, insertId:", ordenId);
@@ -2550,7 +2579,16 @@ Mientras tanto, puede consultar el detalle de sus facturas pendientes aquí:
                             await safeSendMessage(from, { text: `🔍 *Detecté un pedido de ${multiItems.length} producto(s)*, pero no tengo identificado al vendedor.\n\n❓ *¿Cuál es su nombre como vendedor?*\n\n_Escriba el nombre exacto o *cancelar* para cancelar._` });
                             return;
                         }
-                        const multiOrder = { items: multiItems, currentIndex: 0, resolvedItems: [], pct: null, vendedor: vendedor, pushName: pushName };
+                        // Si el vendedor es OFICINA, detectar sub-vendedor desde pushName
+                        let vendedorMulti = { ...vendedor };
+                        if (vendedor.nombre.trim().toUpperCase() === 'OFICINA' && pushName) {
+                            const pn = normalizar(pushName);
+                            const nombresOf = ['juan', 'juan trujillo', 'jose cabral'];
+                            if (nombresOf.some(n => pn === n || pn.startsWith(n))) {
+                                vendedorMulti.subVendedor = pushName;
+                            }
+                        }
+                        const multiOrder = { items: multiItems, currentIndex: 0, resolvedItems: [], pct: null, vendedor: vendedorMulti, pushName: pushName };
                         multiItemOrders.set(from, multiOrder);
                         await processNextMultiItem(from, multiOrder);
                         return;
