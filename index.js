@@ -30,18 +30,50 @@ const PORT = process.env.PORT || 10000;
 
 // LISTA DE ADMINISTRADORES
 const ADMIN_IDS = ["228621243408492", "97899534934200"];   
-
 const pool = mysql.createPool({
     host: 'one4cars.com',
     user: 'juant200_one4car',
     password: 'Notieneclave1*',
-    database: 'juant200_bot_clientes',
+    database: 'juant200_venezon',
     waitForConnections: true,
     connectionLimit: 10,
-    queueLimit: 0
+    queueLimit: 0,
+    charset: 'utf8_spanish_ci'
 });
+const poolLocal = mysql.createPool({
+    host: 'localhost',
+    user: 'root',
+    password: '',
+    database: 'venezon',
+    waitForConnections: true,
+    connectionLimit: 5,
+    queueLimit: 0,
+    charset: 'utf8_spanish_ci'
+});
+const dualExecute = async (sql, params) => {
+    const r = await pool.execute(sql, params);
+    try { await poolLocal.execute(sql, params); } catch (e) { console.log("[DUAL] Local error:", e.message); }
+    return r;
+};
 
-const PDF_URL_CATALOGO = "https://www.one4cars.com/sevencorpweb/uploads/precios/Catalogo%20-%20ONE4CARS_compressed.pdf";
+const BROWSERS = [
+    ["ONE4CARS", "Chrome", "1.0.0"],
+    ["ONE4CARS", "Safari", "1.0.0"],
+    ["ONE4CARS", "Edge", "1.0.0"],
+    ["ONE4CARS", "Firefox", "1.0.0"],
+    ["ONE4CARS BOT", "Chrome", "2.0.0"],
+    ["ONE4CARS CRM", "Chrome", "1.5.0"],
+    ["Chrome", "Linux", "120.0.0"],
+    ["Safari", "MacOS", "17.0.0"],
+    ["Edge", "Windows", "118.0.0"],
+    ["Firefox", "Windows", "119.0.0"]
+];
+let browserIndex = 0;
+function getBrowser() {
+    const b = BROWSERS[browserIndex];
+    browserIndex = (browserIndex + 1) % BROWSERS.length;
+    return b;
+}
 
 const MENU_TEXT = `📋 *MENÚ PRINCIPAL ONE4CARS*
 
@@ -92,8 +124,12 @@ const MENU_INTENTIONS = {
         response: `8️⃣ *Seguimiento Despacho:* https://www.one4cars.com/despacho.php/`
     },
     '9': {
-        keywords: ['asesor humano', 'hablar con un operador', 'soporte humano', 'quiero hablar con alguien', 'ayuda de un operador'],
+        keywords: ['asesor humano', 'hablar con un operador', 'soporte humano', 'quiero hablar con alguien', 'ayuda de un operador', 'contactar asesor', 'contacta un asesor', 'asesor de filtros', 'asesor se comunique', 'hablar con asesor', 'operador humano', 'comuniquen con un asesor', 'comunique con un asesor', 'asesor me contacte'],
         response: `9️⃣ *Asesor Humano:* Indique su duda y un operador revisará el caso pronto. 👩‍💻`
+    },
+    '10': {
+        keywords: ['visitas hoy', 'visitas de hoy', 'reporte de visitas', 'agenda de hoy', 'cuantas visitas tengo hoy', 'visitas del dia'],
+        response: `VISITAS_HOY`
     }
 };
 
@@ -102,6 +138,118 @@ let socketBot = null;
 let dolarInfo = { bcv: 'Cargando...', paralelo: 'Cargando...' };
 let notificadorInterval = null;
 const pendientesConfirmacion = new Map();
+const carritoCompras = new Map();
+const agendaVisitas = new Map();
+const pendingProductSelection = new Map();
+const multiItemOrders = new Map();
+const lastFallbackSent = new Map();
+const FALLBACK_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutos
+
+const VISIT_KEYWORDS = [
+    'me visite', 'me visiten', 'me visita', 'pase por', 'pasar por',
+    'venga a', 'vengan a', 'viene a', 'vienen a', 'pasen por',
+    'que pase', 'que pasen', 'el vendedor', 'lo vendedore',
+    'me vea', 'me vean', 'hacer una visita', 'agendar visita', 'agendar una visita',
+    'programar visita', 'programar una visita', 'quiero visita', 'necesito visita',
+    'no me visita', 'no me visitan', 'tiempo que no me visita',
+    'venga a verme', 'vengan a verme', 'pase a verme',
+    'pasar a cobrar', 'paso a cobrar', 'pase a cobrar',
+    'cobrar', 'cuando puede', 'cuando puedas',
+    'proximo', 'visiten', 'visitar', 'visitarme',
+    'pases por', 'pase por el', 'pasas por', 'pasar por el',
+    'una visita', 'solicito visita', 'requiero visita',
+    'me comunique', 'se comunique', 'asesor me visite',
+    'quiero que me visiten', 'necesito que me visiten',
+    'pueden visitarme', 'pueden pasar', 'puede pasar',
+    'agendarme una visita', 'visita domicilio', 'visita domiciliaria',
+    'vendedor me visite', 'vendedor me visiten',
+    'asesor se comunique conmigo', 'comunique conmigo',
+    'contactar para una visita', 'coordinar visita',
+    'cobro', 'cobranza', 'por el cobro', 'para el cobro',
+    'pasen por el cobro', 'pasar por el cobro', 'pase por el cobro',
+    'pasar a cobro', 'paso a cobro', 'pase a cobro',
+    'cobrar',
+    'un vendedor', 'vendedor', 'quiero un vendedor', 'necesito un vendedor',
+    'me visita un vendedor', 'envien un vendedor', 'envíen un vendedor',
+    'manden un vendedor', 'mandame un vendedor', 'mándame un vendedor'
+];
+
+const DIAS_SEMANA = {
+    'lunes': 1, 'martes': 2, 'miercoles': 3, 'miércoles': 3,
+    'jueves': 4, 'viernes': 5, 'sabado': 6, 'sábado': 6, 'domingo': 0
+};
+
+const PRODUCT_KEYWORDS = [
+    'filtro', 'filtros', 'aceite', 'bujia', 'bujias', 'freno', 'frenos',
+    'pastilla', 'pastillas', 'disco', 'discos', 'correa', 'correas',
+    'rodamiento', 'rodamientos', 'rodaje', 'amortiguador', 'amortiguadores',
+    'reten', 'retones', 'estopera', 'estoperas', 'empaque', 'empaques',
+    'caucho', 'cauchos', 'neumatico', 'neumaticos', 'goma', 'gomas',
+    'bateria', 'baterias', 'radiador', 'radiadores', 'ventilador', 'ventiladores',
+    'alternador', 'alternadores', 'arranque', 'motor', 'motores',
+    'valvula', 'valvulas', 'sensor', 'sensores', 'switch', 'interruptor',
+    'manguera', 'mangueras', 'tapa', 'tapas', 'tanque', 'tanques',
+    'bomba', 'bombas', 'inyector', 'inyectores', 'carburador', 'carburadores',
+    'culata', 'culatas', 'cigueñal', 'cigüeñal', 'piston', 'pistones',
+    'anillo', 'anillos', 'casquillo', 'casquillos', 'biela', 'bielas',
+    'leva', 'levas', 'arbol', 'árbol', 'banda', 'bandas', 'cadena', 'cadenas',
+    'tensor', 'tensores', 'polea', 'poleas', 'alternador', 'alternadores',
+    'compresor', 'compresores', 'aire', 'acondicionado', 'calefaccion',
+    'luz', 'luces', 'foco', 'focos', 'farol', 'faroles', 'lampara', 'lamparas',
+    'parrilla', 'parachoques', 'guardafango', 'capot', 'capota',
+    'puerta', 'puertas', 'manija', 'manijas', 'manilla', 'manillas',
+    'cristal', 'cristales', 'vidrio', 'vidrios', 'parabrisas',
+    'espejo', 'espejos', 'retrovisor', 'retrovisores',
+    'asiento', 'asientos', 'tablero', 'instrumentos', 'reloj', 'relojes',
+    'volante', 'volantes', 'bocina', 'bocinas', 'claxon',
+    'llanta', 'llantas', 'rin', 'rines', 'tapa', 'tapas',
+    'suspension', 'suspensión', 'barra', 'barras', 'estabilizador',
+    'rotula', 'rotulas', 'axial', 'terminal', 'terminales',
+    'caja', 'direccion', 'cremallera', 'cardan', 'cardanes',
+    'embrague', 'clutch', 'presion', 'presión', 'plato', 'platos',
+    'transmision', 'transmisión', 'diferencial', 'junta', 'juntas',
+    'homocinetica', 'homocinética', 'homocinetico', 'homocinético',
+    'tripoide', 'tripoides', 'maza', 'cubo', 'rueda', 'ruedas',
+    'tornillo', 'tornillos', 'tuerca', 'tuercas', 'perno', 'pernos',
+    'esparrago', 'esparragos', 'arandela', 'arandelas', 'seguro', 'seguros',
+    'pasador', 'pasadores', 'chaveta', 'chavetas',
+    'silenciador', 'silenciadores', 'tubo', 'tubos', 'escape', 'escarpe',
+    'multiple', 'múltiple', 'colector', 'colectores',
+    'catalizador', 'catalizadores', 'oxigeno', 'oxígeno',
+    'liquido', 'líquido', 'refrigerante', 'anticongelante',
+    'lubricante', 'grasa', 'aceite', 'hidraulico', 'hidráulico',
+    'lata', 'latas', 'pintura', 'pinturas', 'thinner', 'solvente',
+    'pulido', 'cera', 'ceras', 'shampoo', 'silicona',
+    'kit', 'kits', 'juego', 'juegos', 'set', 'pack',
+    'original', 'alternativo', 'generico', 'genérico', 'importado',
+    'codigo', 'código', 'pieza', 'piezas', 'parte', 'partes',
+    'rodamiento', 'descripcion', 'precio', 'costo', 'valor',
+    'marca', 'marcas', 'modelo', 'modelos', 'ano', 'año', 'años',
+    'diesel', 'gasolina', 'gas', 'gnv', 'electrico', 'eléctrico',
+    'delantero', 'delanteros', 'delantera', 'trasero', 'traseros', 'trasera',
+    'superior', 'inferior', 'lateral', 'central', 'interior', 'exterior',
+    'rolinera', 'rolineras', 'ruleman', 'rulemanes', 'cojinete', 'cojinetes',
+    'sello', 'sellos', 'packing', 'empaquetadura', 'empaquetaduras',
+    'silicon', 'silicona', 'pegamento', 'pega', 'adhesivo',
+    'limpiador', 'limpiadores', 'desengrasante', 'desengrasantes',
+    'bujia', 'bujias', 'cable', 'cables', 'bobina', 'bobinas',
+    'distribuidor', 'distribuidores', 'rotor', 'rotor',
+    'tapa', 'tapas', 'delco', 'plato', 'platinos',
+    'modulo', 'módulo', 'módulos', 'electronico', 'electrónico',
+    'fusible', 'fusibles', 'relay', 'relays', 'relé', 'rele',
+    'computadora', 'computador', 'ecu', 'centralita',
+    'llave', 'llaves', 'switch', 'cerradura', 'cerraduras',
+    'bocacho', 'bocachos', 'trompo', 'trompos', 'campana', 'campanas',
+    'tambor', 'tambores', 'plato', 'platos', 'balata', 'balatas',
+    'zapata', 'zapatas', 'cilindro', 'cilindros', 'bomba', 'bombas',
+    'servofreno', 'servofrenos', 'master', 'booster',
+    'muelle', 'muelles', 'resorte', 'resortes', 'espiral',
+    'plato', 'platos', 'disco', 'discos', 'campana', 'campanas',
+    'caliper', 'calipers', 'mordaza', 'mordazas', 'pistola', 'pistolas',
+    'pinza', 'pinzas', 'tester', 'multimetro', 'probador',
+    'gata', 'gatas', 'gato', 'gatos', 'hidraulico', 'hidráulico',
+    'cargador', 'cargadores', 'arrancador', 'arrancadores', 'pasacorriente'
+];
 
 // ===== FUNCIONES DE APOYO =====
 
@@ -112,6 +260,21 @@ function normalizar(texto) {
         .replace(/[.,\/#!$%\^&\*;:{}=\-_`~()?!]/g, "") 
         .toLowerCase()
         .trim();
+}
+
+function extraerNombreDeSaludo(rawText) {
+    if (!rawText || rawText.trim().length < 3) return null;
+    const t = rawText.trim();
+    const m = t.match(/^(?:hola|saludos?|buenos?\s*(?:dias|día|días|tardes|noches)?|buenas|que tal|qué tal)\s+([A-Za-zÁÉÍÓÚáéíóúñÑüÜ]+(?:\s+[A-Za-zÁÉÍÓÚáéíóúñÑüÜ]+)?)/i);
+    if (m) {
+        let name = m[1].trim();
+        name = name.replace(/\s+(?:como|disculpa|disculpe|permiso|una|quisiera|necesito|queria|quería|te|le|les|me|puedes|podrias|podrías).*/i, '').trim();
+        name = name.replace(/[.,!?;:]+$/, '').trim();
+        if (name.length >= 2 && !/^\d+$/.test(name) && !['yo','tu','el','ella','ellos','nosotros','vosotros','esto','eso','aqui','alli','señor','señora','don','doña','dias','día','días','hoy'].includes(name.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, ""))) {
+            return name.charAt(0).toUpperCase() + name.slice(1).toLowerCase();
+        }
+    }
+    return null;
 }
 
 function limpiarRIF(texto) {
@@ -149,9 +312,72 @@ function formatWhatsApp(jid) {
 
 const sleep = (ms) => new Promise(res => setTimeout(res, ms));
 const randomDelay = async () => {
-    const ms = Math.floor(Math.random() * (25000 - 15000 + 1)) + 15000; 
+    const ms = Math.floor(Math.random() * (25000 - 15000 + 1)) + 15000;
     await sleep(ms);
 };
+const humanDelay = async (minSec = 40, maxSec = 90) => {
+    const ms = Math.floor(Math.random() * ((maxSec - minSec) * 1000 + 1)) + minSec * 1000;
+    await sleep(ms);
+};
+const randomBatchPause = async (baseMinutes = 12) => {
+    const extra = Math.floor(Math.random() * 6); // 0-5 extra minutes
+    const ms = (baseMinutes + extra) * 60 * 1000;
+    await sleep(ms);
+};
+const MESSAGE_TEMPLATES = {
+    visita: [
+        (n) => `👋 Hola *${n}*, soy asesor de ONE4CARS. Queremos coordinar una visita para conocer sus necesidades y ofrecerle nuestros productos. ¿Qué día le queda cómodo?`,
+        (n) => `📅 *${n}*, tenemos novedades en ONE4CARS. ¿Podemos agendar una visita esta semana para mostrarle nuestras ofertas?`,
+        (n) => `🚗 Hola *${n}*, desde ONE4CARS queremos hacerle una visita de cortesía para ver cómo podemos seguir sirviéndole. ¿Podemos pasar esta semana?`,
+        (n) => `🛞 *${n}*, le saluda su asesor ONE4CARS. Queremos visitarlo para presentarle nuestros nuevos productos y precios. ¿Cuándo podría recibirnos?`,
+        (n) => `⭐ Hola *${n}*, soy su enlace ONE4CARS. Nos gustaría pasar por su negocio para una visita de seguimiento y atención. ¿Qué día le parece bien?`,
+        (n) => `🔧 *${n}*, reciba un cordial saludo de ONE4CARS. Queremos agendar una visita para conocer sus requerimientos y ofrecerle lo mejor. ¿Estaría disponible esta semana?`,
+        (n) => `📞 *${n}*, buenos días. Le habla su asesor ONE4CARS. Quisiéramos coordinar un día para visitarlo y conversar sobre cómo podemos ayudarle a crecer. ¿Cuándo sería ideal para usted?`,
+        (n) => `🎯 *${n}*, en ONE4CARS queremos ofrecerle una atención más cercana. ¿Podemos agendar una visita esta semana para conocer sus necesidades y mostrarle nuestras soluciones?`,
+        (n) => `🤝 Hola *${n}*, soy de ONE4CARS. Valoramos su confianza y queremos visitarlo personalmente para seguir fortaleciendo nuestra relación comercial. ¿Qué día le funciona?`,
+        (n) => `📋 *${n}*, le escribe su asesor ONE4CARS. Queremos pasar por su establecimiento para conocer sus requerimientos actuales y ofrecerle lo mejor de nuestro catálogo. ¿Podemos coordinar una visita?`
+    ],
+    cobranza60: [
+        (n, f, divisas, dias, bcv) => `🧾 *AVISO DE PAGO PENDIENTE*\n\nHola *${n}*, la factura *N° ${f}* emitida presenta un saldo de *$${divisas}* que ya superó los ${dias} días de vencida. Le agradecemos realizar el pago a la brevedad para mantener su historial al día.\n\nTotal Divisas: $${divisas}\nTotal Bs: ${bcv}\n\nQuedamos a su disposición. 🚗`,
+        (n, f, divisas, dias, bcv) => `⚠️ *NOTIFICACIÓN DE VENCIMIENTO*\n\nHola *${n}*, le recordamos que la factura *N° ${f}* tiene ${dias} días de vencida con un saldo de *$${divisas}*. Le solicitamos proceder al pago lo antes posible.\n\n💰 Total Divisas: $${divisas}\nTotal Bs: ${bcv}\n\nGracias por su atención. 🚗`,
+        (n, f, divisas, dias, bcv) => `📋 *RECORDATORIO DE PAGO*\n\nEstimado(a) *${n}*, la factura *N° ${f}* se encuentra vencida desde hace ${dias} días con un saldo pendiente de *$${divisas}*. Agradecemos su pronta gestión de pago.\n\nTotal Divisas: $${divisas}\nTotal Bs: ${bcv}\n\nSaludos cordiales. 🚗`,
+        (n, f, divisas, dias, bcv) => `📌 *CUENTA POR COBRAR*\n\nHola *${n}*, le notificamos que la factura *N° ${f}* por *$${divisas}* tiene ${dias} días de vencida. Le solicitamos cancelar a la brevedad para evitar recargos.\n\nTotal Divisas: $${divisas}\nTotal Bs: ${bcv}\n\nAgradecemos su atención. 🚗`,
+        (n, f, divisas, dias, bcv) => `⏰ *VENCIMIENTO DE FACTURA*\n\nEstimado(a) *${n}*, la factura *N° ${f}* por *$${divisas}* acumula ${dias} días de retraso. Le agradecemos ponerse al día con su pago.\n\n💰 Total Divisas: $${divisas}\nTotal Bs: ${bcv}\n\nQuedamos a la espera de su gestión. 🚗`,
+        (n, f, divisas, dias, bcv) => `📢 *PAGO PENDIENTE*\n\nHola *${n}*, le recordamos que la factura *N° ${f}* con saldo de *$${divisas}* está vencida desde hace ${dias} días. Le solicitamos realizar el pago lo antes posible.\n\nTotal Divisas: $${divisas}\nTotal Bs: ${bcv}\n\nGracias por su comprensión. 🚗`,
+        (n, f, divisas, dias, bcv) => `📄 *ESTADO DE CUENTA*\n\nEstimado(a) *${n}*, su factura *N° ${f}* por *$${divisas}* presenta ${dias} días de vencida. Le invitamos a cancelar para mantener su récord comercial al día.\n\n💰 Total Divisas: $${divisas}\nTotal Bs: ${bcv}\n\nSaludos cordiales. 🚗`,
+        (n, f, divisas, dias, bcv) => `🔴 *AVISO IMPORTANTE*\n\nHola *${n}*, la factura *N° ${f}* con saldo de *$${divisas}* tiene ${dias} días de vencida. Le agradecemos gestionar el pago a la brevedad.\n\nTotal Divisas: $${divisas}\nTotal Bs: ${bcv}\n\nQuedamos a su disposición. 🚗`,
+        (n, f, divisas, dias, bcv) => `📬 *NOTIFICACIÓN DE COBRANZA*\n\nEstimado(a) *${n}*, le informamos que la factura *N° ${f}* por *$${divisas}* se encuentra vencida (${dias} días). Le solicitamos proceder al pago.\n\n💰 Total Divisas: $${divisas}\nTotal Bs: ${bcv}\n\nAgradecemos su pronta respuesta. 🚗`,
+        (n, f, divisas, dias, bcv) => `📑 *SALDO PENDIENTE*\n\nHola *${n}*, la factura *N° ${f}* emitida por *$${divisas}* supera los ${dias} días de vencida. Le agradecemos cancelar lo antes posible.\n\nTotal Divisas: $${divisas}\nTotal Bs: ${bcv}\n\nGracias por su gestión. 🚗`
+    ],
+    recordatorioEstado: [
+        (n, nota, divisas, dias, bcv) => `📢 *ONE4CARS — Recordatorio de Pago* 🚗\n\nEstimado(a) *${n}*, le escribimos de manera cordial para recordarle que la nota ${nota} por un Monto de $${divisas} se encuentra vencida desde hace ${dias}. Le solicitamos proceder con el pago a la brevedad para evitar suspensiones en el servicio y mantener su historial comercial al día.\n\n💰 Realice su pago ahora y continúe disfrutando de nuestros productos y atención preferencial.\nTotal Divisas: $${divisas}\nTotal Bs: ${bcv}\n\nAgradecemos su pronta gestión. ¡Gracias por confiar en ONE4CARS! 🚀`,
+        (n, nota, divisas, dias, bcv) => `📢 *ONE4CARS — Aviso de Pago Pendiente* 🚗\n\nHola *${n}*, por medio del presente le recordamos que la nota ${nota} por $${divisas} se encuentra pendiente de pago desde hace ${dias}. Le agradecemos regularizar su situación a la mayor brevedad.\n\n💳 Total Divisas: $${divisas}\nTotal Bs: ${bcv}\n\nQuedamos atentos a su gestión. ¡Gracias por preferirnos! 🚗`,
+        (n, nota, divisas, dias, bcv) => `📢 *ONE4CARS — Notificación de Deuda* 🚗\n\nEstimado(a) *${n}*, le comunicamos cordialmente que la nota ${nota} por $${divisas} acumula ${dias} de vencida. Le solicitamos efectuar el pago para mantener su cuenta al día.\n\n💰 Total Divisas: $${divisas}\nTotal Bs: ${bcv}\n\nA la espera de su pronta respuesta. ¡Saludos! 🚗`,
+        (n, nota, divisas, dias, bcv) => `📢 *ONE4CARS — Cuenta por Cobrar* 🚗\n\nHola *${n}*, le recordamos que la nota ${nota} por $${divisas} tiene ${dias} de vencida. Le agradecemos cancelar a la brevedad para mantener su historial al día.\n\n💰 Total Divisas: $${divisas}\nTotal Bs: ${bcv}\n\nGracias por su atención. 🚗`,
+        (n, nota, divisas, dias, bcv) => `📢 *ONE4CARS — Aviso de Vencimiento* 🚗\n\nEstimado(a) *${n}*, la nota ${nota} por $${divisas} se encuentra vencida (${dias}). Le solicitamos proceder con el pago para evitar suspensiones.\n\n💳 Total Divisas: $${divisas}\nTotal Bs: ${bcv}\n\nAgradecemos su gestión. 🚗`,
+        (n, nota, divisas, dias, bcv) => `📢 *ONE4CARS — Nota Pendiente* 🚗\n\nHola *${n}*, le escribimos para informarle que la nota ${nota} por $${divisas} acumula ${dias} de vencida. Le agradecemos ponerse al día.\n\n💰 Total Divisas: $${divisas}\nTotal Bs: ${bcv}\n\nQuedamos a su disposición. 🚗`,
+        (n, nota, divisas, dias, bcv) => `📢 *ONE4CARS — Estado de Cuenta* 🚗\n\nEstimado(a) *${n}*, su nota ${nota} por $${divisas} está pendiente de pago desde hace ${dias}. Le solicitamos cancelar a la brevedad.\n\n💳 Total Divisas: $${divisas}\nTotal Bs: ${bcv}\n\nGracias por su preferencia. 🚗`,
+        (n, nota, divisas, dias, bcv) => `📢 *ONE4CARS — Deuda Pendiente* 🚗\n\nHola *${n}*, le notificamos que la nota ${nota} por $${divisas} tiene ${dias} de vencida. Le agradecemos regularizar su situación.\n\n💰 Total Divisas: $${divisas}\nTotal Bs: ${bcv}\n\nSaludos cordiales. 🚗`,
+        (n, nota, divisas, dias, bcv) => `📢 *ONE4CARS — Aviso de Cobro* 🚗\n\nEstimado(a) *${n}*, la nota ${nota} por $${divisas} supera los ${dias} de vencida. Le solicitamos efectuar el pago a la brevedad.\n\n💳 Total Divisas: $${divisas}\nTotal Bs: ${bcv}\n\nAgradecemos su atención. 🚗`,
+        (n, nota, divisas, dias, bcv) => `📢 *ONE4CARS — Saldo Vencido* 🚗\n\nHola *${n}*, su nota ${nota} por $${divisas} se encuentra vencida desde hace ${dias}. Le agradecemos proceder con el pago.\n\n💰 Total Divisas: $${divisas}\nTotal Bs: ${bcv}\n\nGracias por confiar en ONE4CARS. 🚗`
+    ]
+};
+const pickTemplate = (arr) => arr[Math.floor(Math.random() * arr.length)];
+const DIAS_ENVIADOS_HOY = new Set();
+const MAX_ENVIOS_POR_DIA = 20;
+let enviadosHoy = 0;
+function chequearLimiteDiario() {
+    const hoy = new Date().toDateString();
+    if (DIAS_ENVIADOS_HOY.size === 0 || !DIAS_ENVIADOS_HOY.has(hoy)) {
+        DIAS_ENVIADOS_HOY.clear();
+        DIAS_ENVIADOS_HOY.add(hoy);
+        enviadosHoy = 0;
+        return true;
+    }
+    if (enviadosHoy >= MAX_ENVIOS_POR_DIA) return false;
+    return true;
+}
+function contarEnvio() { enviadosHoy++; }
 
 async function guardarMensaje(tel, rol, contenido) {
     try {
@@ -160,7 +386,45 @@ async function guardarMensaje(tel, rol, contenido) {
 }
 
 async function setModo(tel, modo) {
-    await pool.execute("INSERT INTO control_chat (telefono, modo) VALUES (?, ?) ON DUPLICATE KEY UPDATE modo = VALUES(modo)", [tel, modo]);
+    await pool.execute("INSERT INTO control_chat (telefono, modo, updated_at) VALUES (?, ?, NOW()) ON DUPLICATE KEY UPDATE modo = VALUES(modo), updated_at = NOW()", [tel, modo]);
+}
+const REACTIVAR_BOT_MS = 2 * 60 * 60 * 1000; // 2 horas sin actividad humana → el bot se reactiva solo
+
+async function setSesionDatos(tel, datos) {
+    try {
+        await pool.execute("INSERT INTO control_chat (telefono, datos, updated_at) VALUES (?, ?, NOW()) ON DUPLICATE KEY UPDATE datos = VALUES(datos), updated_at = NOW()", [tel, JSON.stringify(datos)]);
+    } catch (e) { console.log("Error guardando datos sesión:", e.message); }
+}
+
+async function clearSesionDatos(tel) {
+    try {
+        await pool.execute("UPDATE control_chat SET datos = NULL WHERE telefono = ?", [tel]);
+    } catch (e) {}
+}
+
+async function restaurarSesiones() {
+    try {
+        const [rows] = await pool.execute("SELECT telefono, modo, datos FROM control_chat WHERE modo IN ('confirmando', 'visitando', 'esperando_cliente') AND datos IS NOT NULL");
+        let cont = 0;
+        for (const r of rows) {
+            try {
+                const datos = JSON.parse(r.datos);
+                if (r.modo === 'confirmando') {
+                    pendientesConfirmacion.set(r.telefono, datos);
+                    cont++;
+                } else if (r.modo === 'visitando') {
+                    if (datos.esperando_fecha || datos.esperando_confirmacion) {
+                        if (datos.acuerdo_visita) datos.acuerdo_visita = new Date(datos.acuerdo_visita);
+                        agendaVisitas.set(r.telefono, datos);
+                        cont++;
+                    }
+                } else if (r.modo === 'esperando_cliente') {
+                    cont++;
+                }
+            } catch (e2) {}
+        }
+        console.log(`[SESIONES] ${cont} sesion(es) restaurada(s) de la BD.`);
+    } catch (e) { console.log("[SESIONES] Error restaurando:", e.message); }
 }
 
 async function buscarVendedor(jid, pushName) {
@@ -198,6 +462,306 @@ function detectarIntencionMenu(texto) {
     return null;
 }
 
+function detectarVisita(rawText, text) {
+    if (!rawText) return false;
+    const t = text || normalizar(rawText);
+    for (const kw of VISIT_KEYWORDS) {
+        if (t.includes(kw)) return true;
+    }
+    return false;
+}
+
+function parsearFechaVisita(texto) {
+    const t = normalizar(texto);
+    const hoy = new Date();
+    hoy.setHours(0, 0, 0, 0);
+
+    if (t === 'hoy' || t.includes('ahora') || t === 'ya' || t === 'hoy mismo') return { fecha: new Date(hoy), frecuencia: 0 };
+
+    if (t.includes('manana') && !t.includes('pasado')) {
+        const r = new Date(hoy);
+        r.setDate(r.getDate() + 1);
+        return { fecha: r, frecuencia: 0 };
+    }
+    if (t.includes('pasado manana') || t.includes('pasado mañana')) {
+        const r = new Date(hoy);
+        r.setDate(r.getDate() + 2);
+        return { fecha: r, frecuencia: 0 };
+    }
+
+    const matchNumDias = t.match(/(\d+)\s*(?:dias|día|dia)/);
+    if (matchNumDias) {
+        const r = new Date(hoy);
+        r.setDate(r.getDate() + parseInt(matchNumDias[1]));
+        return { fecha: r, frecuencia: 0 };
+    }
+
+    const matchSemana = t.match(/(\d+)\s*(?:semanas|semana)/);
+    if (matchSemana) {
+        const r = new Date(hoy);
+        r.setDate(r.getDate() + parseInt(matchSemana[1]) * 7);
+        return { fecha: r, frecuencia: 0 };
+    }
+
+    const matchMes = t.match(/(\d+)\s*(?:meses|mes)/);
+    if (matchMes) {
+        const r = new Date(hoy);
+        r.setMonth(r.getMonth() + parseInt(matchMes[1]));
+        return { fecha: r, frecuencia: 0 };
+    }
+
+    const matchDiaSemana = t.match(/(?:este|esta|proximo|próximo|proxima|próxima|el|que viene|los|todos los|todos)\s*(lunes|martes|miercoles|miércoles|jueves|viernes|sabado|sábado|domingo)/i);
+    if (matchDiaSemana) {
+        const diaNombre = matchDiaSemana[1].toLowerCase();
+        const prefix = matchDiaSemana[0].toLowerCase().split(/\s+/)[0];
+        const diaTarget = DIAS_SEMANA[diaNombre];
+        if (diaTarget !== undefined) {
+            const diff = (diaTarget - hoy.getDay() + 7) % 7;
+            const r = new Date(hoy);
+            if (diff === 0) {
+                r.setDate(r.getDate() + 7);
+            } else {
+                r.setDate(r.getDate() + diff);
+            }
+            const frecuencia = (prefix === 'los' || prefix === 'todos') ? 7 : 0;
+            return { fecha: r, frecuencia };
+        }
+    }
+
+    const matchFechaNum = t.match(/(\d{1,2})\s*(?:\/|-)\s*(\d{1,2})(?:\s*(?:\/|-)\s*(\d{2,4}))?/);
+    if (matchFechaNum) {
+        const d = parseInt(matchFechaNum[1]);
+        const m = parseInt(matchFechaNum[2]) - 1;
+        let y = hoy.getFullYear();
+        if (matchFechaNum[3]) {
+            y = parseInt(matchFechaNum[3]);
+            if (y < 100) y += 2000;
+        }
+        const r = new Date(y, m, d);
+        if (!isNaN(r.getTime())) return { fecha: r, frecuencia: 0 };
+    }
+
+    if (t.includes('proxima semana') || t.includes('proxima semana')) {
+        const r = new Date(hoy);
+        r.setDate(r.getDate() + 7);
+        return { fecha: r, frecuencia: 0 };
+    }
+
+    if (t === 'semana que viene' || t === 'la semana que viene') {
+        const r = new Date(hoy);
+        r.setDate(r.getDate() + 7);
+        return { fecha: r, frecuencia: 0 };
+    }
+
+    return null;
+}
+
+async function guardarVisita(from, datos) {
+    try {
+        const hoy = new Date().toISOString().split('T')[0];
+        const acuerdo = datos.acuerdo_visita ? datos.acuerdo_visita.toISOString().split('T')[0] : hoy;
+        await pool.execute(
+            `INSERT INTO tab_visitas 
+             (fecha_reg, rif, id_cliente, nombres, direccion, telefono, celular, id_vendedor, nombre, 
+              direcciongooglemap, zona, visita_realizada, contador_visitas, motivo, logro, acuerdo_visita, 
+              dias_frecuencia, interes_producto) 
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'NO', 1, ?, 'NO', ?, ?, 'SI')`,
+            [
+                hoy,
+                datos.rif || '',
+                datos.id_cliente || 0,
+                datos.nombres || 'Cliente WhatsApp',
+                datos.direccion || '',
+                datos.telefono || '',
+                datos.celular || from.split('@')[0],
+                datos.id_vendedor || 0,
+                datos.nombre_vendedor || '',
+                '',
+                datos.zona || '',
+                datos.motivo || 'Solicitud de visita por WhatsApp',
+                acuerdo,
+                datos.dias_frecuencia || 0
+            ]
+        );
+        console.log(`[VISITA] ✅ Visita agendada para ${from}`);
+        return true;
+    } catch (e) {
+        console.log("[VISITA] Error al guardar:", e.message);
+        return false;
+    }
+}
+
+async function buscarClientePorTelefono(tel) {
+    const telLimpio = tel.replace(/\D/g, '');
+    try {
+        const [r] = await pool.execute(
+            "SELECT id_cliente, nombres, cedula, celular, telefono, direccion, zona, clave as rif, vendedor FROM tab_clientes WHERE REPLACE(celular, ' ', '') LIKE ? OR REPLACE(telefono, ' ', '') LIKE ? LIMIT 1",
+            [`%${telLimpio}%`, `%${telLimpio}%`]
+        );
+        return r[0] || null;
+    } catch (e) { return null; }
+}
+
+// ===== VERIFICACIÓN DE CRÉDITO DEL CLIENTE =====
+
+function extraerNombreCliente(rawText, itemsPedido) {
+    if (!rawText) return null;
+    let textoRestante = rawText;
+    for (const item of itemsPedido) {
+        const regexCodigo = new RegExp(`(?:^|\\n)\\s*(?:${item.cantidad}\\s*[-=]?\\s*${item.codigo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}|${item.codigo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*[-=]?\\s*${item.cantidad})\\s*(?:piezas?|und|unidad(?:es)?|uds?|unid\\.?)?\\s*$`, 'gim');
+        textoRestante = textoRestante.replace(regexCodigo, '');
+    }
+    textoRestante = textoRestante
+        .replace(/\b\d{1,4}\s*[-=]?\s*[A-Za-z0-9]{3,}\b/g, '')
+        .replace(/\b[A-Za-z0-9]{3,}\s*[-=]?\s*\d{1,4}\b/g, '')
+        .replace(/\b(piezas?|und|unidad(?:es)?|uds?|unid\.?|pedido|cotiza(?:r|me|íme)|orden|compra|necesito|quisiera|enviame|envíame|por favor|favor)\b/gi, '')
+        .replace(/[,\-;:=]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    const palabras = textoRestante.split(' ').filter(p => p.length >= 3);
+    if (palabras.length === 0) return null;
+    const nombre = palabras.join(' ');
+    if (/^\d+$/.test(nombre)) return null;
+    return nombre.charAt(0).toUpperCase() + nombre.slice(1).toLowerCase();
+}
+
+async function buscarClientePorNombreYVendedor(nombreCliente, nombreVendedor) {
+    if (!nombreCliente || !nombreVendedor) return null;
+    try {
+        const [r] = await pool.execute(
+            "SELECT id_cliente, nombres, cedula, celular, telefono, direccion, zona, clave as rif, vendedor FROM tab_clientes WHERE vendedor = ? AND nombres LIKE ? AND activo = 'si' LIMIT 1",
+            [nombreVendedor, `%${nombreCliente}%`]
+        );
+        if (r[0]) return r[0];
+        const [r2] = await pool.execute(
+            "SELECT id_cliente, nombres, cedula, celular, telefono, direccion, zona, clave as rif, vendedor FROM tab_clientes WHERE vendedor LIKE ? AND nombres LIKE ? AND activo = 'si' LIMIT 1",
+            [`%${nombreVendedor}%`, `%${nombreCliente}%`]
+        );
+        return r2[0] || null;
+    } catch (e) { return null; }
+}
+
+async function buscarClientePorPalabras(palabras, nombreVendedor, textoOriginal) {
+    if (!palabras || palabras.length === 0) return null;
+    try {
+        // Primero buscar por el texto completo original (respeta palabras cortas como "de", "la", "el")
+        if (textoOriginal) {
+            const [r0] = await pool.execute(
+                `SELECT id_cliente, nombres, cedula, celular, telefono, direccion, zona, clave as rif, vendedor
+                 FROM tab_clientes WHERE nombres LIKE ? AND activo = 'si' LIMIT 1`,
+                [`%${textoOriginal}%`]
+            );
+            if (r0[0]) return r0[0];
+        }
+        const conditions = palabras.map(() => 'nombres LIKE ?').join(' OR ');
+        if (nombreVendedor) {
+            const params = [nombreVendedor];
+            for (const p of palabras) params.push(`%${p}%`);
+            const [r] = await pool.execute(
+                `SELECT id_cliente, nombres, cedula, celular, telefono, direccion, zona, clave as rif, vendedor
+                 FROM tab_clientes WHERE vendedor = ? AND (${conditions}) AND activo = 'si' LIMIT 1`,
+                params
+            );
+            if (r[0]) return r[0];
+            const params2 = [`%${nombreVendedor}%`];
+            for (const p of palabras) params2.push(`%${p}%`);
+            const [r2] = await pool.execute(
+                `SELECT id_cliente, nombres, cedula, celular, telefono, direccion, zona, clave as rif, vendedor
+                 FROM tab_clientes WHERE vendedor LIKE ? AND (${conditions}) AND activo = 'si' LIMIT 1`,
+                params2
+            );
+            if (r2[0]) return r2[0];
+        }
+        // Sin filtro de vendedor — primero intentar LIKE con el nombre completo
+        const nombreCompleto = palabras.join(' ');
+        const [r3] = await pool.execute(
+            `SELECT id_cliente, nombres, cedula, celular, telefono, direccion, zona, clave as rif, vendedor
+             FROM tab_clientes WHERE nombres LIKE ? AND activo = 'si' LIMIT 1`,
+            [`%${nombreCompleto}%`]
+        );
+        if (r3[0]) return r3[0];
+        // Buscar por palabras individuales (AND — todas deben coincidir)
+        const andConditions = palabras.map(() => 'nombres LIKE ?').join(' AND ');
+        const params4 = palabras.map(p => `%${p}%`);
+        const [r4] = await pool.execute(
+            `SELECT id_cliente, nombres, cedula, celular, telefono, direccion, zona, clave as rif, vendedor
+             FROM tab_clientes WHERE (${andConditions}) AND activo = 'si' LIMIT 1`,
+            params4
+        );
+        if (r4[0]) return r4[0];
+        // Último recurso: OR, pero limitado
+        const params5 = palabras.map(p => `%${p}%`);
+        const [r5] = await pool.execute(
+            `SELECT id_cliente, nombres, cedula, celular, telefono, direccion, zona, clave as rif, vendedor
+             FROM tab_clientes WHERE (${conditions}) AND activo = 'si' LIMIT 1`,
+            params5
+        );
+        return r5[0] || null;
+    } catch (e) { return null; }
+}
+
+function extraerPalabrasClave(rawText, itemsPedido) {
+    if (!rawText) return [];
+    let texto = rawText;
+    for (const item of itemsPedido) {
+        const codEsc = item.codigo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        texto = texto.replace(new RegExp(`(?:^|\\n)\\s*(?:${item.cantidad}\\s*[-=]?\\s*${codEsc}|${codEsc}\\s*[-=]?\\s*${item.cantidad})`, 'gi'), '');
+    }
+    texto = texto
+        .replace(/\b\d{1,4}\s*[-=]?\s*[A-Za-z0-9]{3,}\b/g, '')
+        .replace(/\b[A-Za-z0-9]{3,}\s*[-=]?\s*\d{1,4}\b/g, '')
+        .replace(/\b(piezas?|und|unidad(?:es)?|uds?|unid\.?|pedido|cotiza(?:r|me|íme)|orden|compra|necesito|quisiera|enviame|envíame|por favor|favor|buenos?|buenas?|dias?|tardes?|noches?|saludos?|hola|mi|nombre|soy|este|para|como|todo|puede|algo)\b/gi, '')
+        .replace(/[,\-;:=]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    const palabras = texto.split(' ')
+        .filter(p => p.length >= 3)
+        .filter(p => !/^\d+$/.test(p))
+        .map(p => p.toUpperCase());
+    return [...new Set(palabras)];
+}
+
+async function verificarCreditoCliente(id_cliente) {
+    const resultado = { tieneVencidas: false, facturasVencidas: [], tieneRetrasos: false, mayorRetraso: 0, facturasRetraso: [] };
+    try {
+        const [vencidas] = await pool.execute(
+            `SELECT f.id_factura, f.nro_factura, f.total, f.abono_factura, f.fecha_reg, f.porcentaje,
+                    DATEDIFF(CURDATE(), f.fecha_reg) as dias_vencida
+             FROM tab_facturas f
+             WHERE f.id_cliente = ? AND f.pagada = 'NO' AND f.anulado = 'no'
+               AND DATEDIFF(CURDATE(), f.fecha_reg) > 30
+             ORDER BY f.fecha_reg ASC`,
+            [id_cliente]
+        );
+        if (vencidas.length > 0) {
+            resultado.tieneVencidas = true;
+            resultado.facturasVencidas = vencidas.map(f => ({
+                nro_factura: f.nro_factura,
+                saldo: (parseFloat(f.total) - parseFloat(f.abono_factura || 0)) / (parseFloat(f.porcentaje) || 1),
+                dias_vencida: f.dias_vencida
+            }));
+        }
+        const [retrasos] = await pool.execute(
+            `SELECT f.id_factura, f.nro_factura, f.total, f.abono_factura, f.fecha_reg, f.porcentaje, f.dias_pago
+             FROM tab_facturas f
+             WHERE f.id_cliente = ? AND f.pagada = 'SI' AND f.anulado = 'no'
+               AND f.dias_pago > 60
+             ORDER BY f.fecha_reg DESC
+             LIMIT 4`,
+            [id_cliente]
+        );
+        if (retrasos.length > 0) {
+            resultado.tieneRetrasos = true;
+            resultado.mayorRetraso = Math.max(...retrasos.map(f => parseInt(f.dias_pago) || 0));
+            resultado.facturasRetraso = retrasos.map(f => ({
+                nro_factura: f.nro_factura,
+                dias_pago: parseInt(f.dias_pago) || 0
+            }));
+        }
+    } catch (e) { console.log("[CREDITO] Error verificando:", e.message); }
+    return resultado;
+}
+
 // ===== BASE DE DATOS =====
 async function initDB() {
     try {
@@ -206,8 +770,10 @@ async function initDB() {
             usuario VARCHAR(50), 
             id_cliente_int INT,
             modo VARCHAR(20) DEFAULT 'bot', 
+            datos TEXT DEFAULT NULL,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci`);
+        try { await pool.execute("ALTER TABLE control_chat ADD COLUMN datos TEXT DEFAULT NULL AFTER modo"); } catch (e) {}
         
         await pool.execute(`CREATE TABLE IF NOT EXISTS historial_chat (
             id INT AUTO_INCREMENT PRIMARY KEY, 
@@ -234,7 +800,55 @@ async function initDB() {
             id INT AUTO_INCREMENT PRIMARY KEY,
             fecha_envio DATE NOT NULL
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci`);
-        
+
+        await pool.execute(`CREATE TABLE IF NOT EXISTS recordatorio_visita_log (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            id_cliente INT NOT NULL,
+            semana_inicio DATE NOT NULL,
+            fecha_envio TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE KEY uk_visita_cliente_semana (id_cliente, semana_inicio)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci`);
+
+        await pool.execute(`CREATE TABLE IF NOT EXISTS tab_visitas (
+            id_visita INT AUTO_INCREMENT PRIMARY KEY,
+            fecha_reg DATE NOT NULL,
+            rif VARCHAR(50) DEFAULT '',
+            id_cliente INT DEFAULT 0,
+            nombres VARCHAR(150) DEFAULT '',
+            direccion VARCHAR(200) DEFAULT '',
+            telefono VARCHAR(50) DEFAULT '',
+            celular VARCHAR(50) DEFAULT '',
+            id_vendedor INT DEFAULT 0,
+            nombre VARCHAR(100) DEFAULT '',
+            direcciongooglemap VARCHAR(150) DEFAULT '',
+            zona VARCHAR(150) DEFAULT '',
+            visita_realizada VARCHAR(10) DEFAULT 'NO',
+            contador_visitas INT DEFAULT 1,
+            motivo VARCHAR(100) DEFAULT '',
+            logro VARCHAR(10) DEFAULT 'NO',
+            acuerdo_visita DATE DEFAULT NULL,
+            dias_frecuencia INT DEFAULT 0,
+            interes_producto VARCHAR(10) DEFAULT 'SI'
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci`);
+
+        // Migración: eliminar duplicados en tab_agenda_visitas y agregar UNIQUE(id_cliente, fecha)
+        try {
+            await pool.execute(`
+                DELETE a FROM tab_agenda_visitas a
+                INNER JOIN tab_agenda_visitas b
+                ON a.id_cliente = b.id_cliente AND a.fecha = b.fecha AND a.id_agenda > b.id_agenda
+            `);
+            try { await pool.execute("ALTER TABLE tab_agenda_visitas ADD UNIQUE INDEX uq_cliente_fecha (id_cliente, fecha)"); } catch (e) {}
+        } catch (e) { console.log("[DB] Migración agenda remota:", e.message); }
+        try {
+            await poolLocal.execute(`
+                DELETE a FROM tab_agenda_visitas a
+                INNER JOIN tab_agenda_visitas b
+                ON a.id_cliente = b.id_cliente AND a.fecha = b.fecha AND a.id_agenda > b.id_agenda
+            `);
+            try { await poolLocal.execute("ALTER TABLE tab_agenda_visitas ADD UNIQUE INDEX uq_cliente_fecha (id_cliente, fecha)"); } catch (e) {}
+        } catch (e) { console.log("[DB] Migración agenda local:", e.message); }
+
         console.log("✅ Base de Datos vinculada.");
     } catch (e) { console.log("❌ Error DB Init:", e.message); }
 }
@@ -255,7 +869,7 @@ async function guardarUsuario(jid, usuario, id_int) {
 async function buscarCliente(rifLimpio) {
     const soloNum = soloNumerosRIF(rifLimpio);
     const [r] = await pool.execute(
-        "SELECT id_cliente, nombres, celular, cedula, direccion, zona FROM tab_clientes WHERE clave = ? OR clave = ? OR clave LIKE CONVERT(? USING utf8) COLLATE utf8_spanish_ci LIMIT 1", 
+        "SELECT id_cliente, nombres, celular, cedula, direccion, zona FROM tab_clientes WHERE clave = ? OR clave = ? OR clave LIKE ? LIMIT 1", 
         [rifLimpio, soloNum, `%${rifLimpio}%`]
     );
     return r[0] || null;
@@ -275,6 +889,10 @@ async function buscarProductoPorCodigo(codigo) {
         const sql = `SELECT producto, descripcion, tipo, precio_minimo, (cantidad_existencia + cantidad_existencia_almacen) as stock_total, cantidad_fabricando FROM tab_productos WHERE producto = ? LIMIT 1`;
         const [rows] = await pool.execute(sql, [codLimpio]);
         if (rows.length > 0) return rows;
+        if (/^\d+$/.test(codLimpio)) {
+            const [rows2] = await pool.execute(`SELECT producto, descripcion, tipo, precio_minimo, (cantidad_existencia + cantidad_existencia_almacen) as stock_total, cantidad_fabricando FROM tab_productos WHERE producto LIKE ? LIMIT 1`, [`%${codLimpio}%`]);
+            if (rows2.length > 0) return rows2;
+        }
     } catch (e) {
         console.log("Error buscando por código exacto:", e.message);
     }
@@ -302,7 +920,7 @@ async function buscarProductoPorTexto(texto) {
     textoBuscado = textoBuscado.replace(/GRANCHEROKEE|GRANDCHEROKEE/gi, "GRAND CHEROKEE");
     textoBuscado = textoBuscado.replace(/GRANBLAZER|GRANDVLAZER/gi, "GRAND BLAZER");
     textoBuscado = textoBuscado.replace(/GRANVITARA|GRANDVITARA/gi, "GRAND VITARA");
-    textoBuscado = textoBuscado.replace(/SUPER\s*CARRY/gi, "SUPER CARRY");
+        textoBuscado = textoBuscado.replace(/SUPER\s*CARRY/gi, "SUPER CARRY");
     const txtNormal = normalizar(textoBuscado);
     // ====================================================
 
@@ -366,14 +984,14 @@ async function buscarProductoPorTexto(texto) {
 
     palabrasBase.forEach((pal, index) => {
         const formas = expandirFormas(pal);
-        const conditions = formas.map(() => "descripcion LIKE CONVERT(? USING utf8) COLLATE utf8_spanish_ci");
+        const conditions = formas.map(() => "descripcion LIKE ?");
         whereClause += `(${conditions.join(" OR ")})`;
         if (index < palabrasBase.length - 1) whereClause += " AND ";
         formas.forEach(f => queryParams.push(`%${f}%`));
     });
 
     try {
-        const sql = `SELECT producto, descripcion, tipo, precio_minimo, (cantidad_existencia + cantidad_existencia_almacen) as stock_total, cantidad_fabricando FROM tab_productos WHERE ${whereClause} LIMIT 8`;
+        const sql = `SELECT producto, descripcion, tipo, precio_minimo, (cantidad_existencia + cantidad_existencia_almacen) as stock_total, cantidad_fabricando FROM tab_productos WHERE activo = 'si' AND (COALESCE(cantidad_existencia,0) + COALESCE(cantidad_existencia_almacen,0) > 0 OR COALESCE(cantidad_fabricando,0) > 0) AND (${whereClause}) LIMIT 8`;
         const [rows] = await pool.execute(sql, queryParams);
         if (rows.length > 0) return rows;
     } catch (e) {
@@ -386,12 +1004,12 @@ async function buscarProductoPorTexto(texto) {
     }
 
     const expandedTerms = [...new Set(palabrasBase.flatMap(expandirFormas))];
-    const orConditions = expandedTerms.map(() => "descripcion LIKE CONVERT(? USING utf8) COLLATE utf8_spanish_ci");
+    const orConditions = expandedTerms.map(() => "descripcion LIKE ?");
     const orParams = expandedTerms.map(p => `%${p}%`);
 
     const relevanceParts = palabrasBase.map(p => {
         const formas = expandirFormas(p);
-        const cases = formas.map(f => `descripcion LIKE CONVERT('%${f.replace(/[^a-z]/g, '')}%' USING utf8) COLLATE utf8_spanish_ci`);
+        const cases = formas.map(f => `descripcion LIKE '%${f.replace(/[^a-z]/g, '')}%'`);
         return `(CASE WHEN ${cases.join(' OR ')} THEN 1 ELSE 0 END)`;
     });
     const relevanceSQL = relevanceParts.join(' + ');
@@ -400,7 +1018,7 @@ async function buscarProductoPorTexto(texto) {
         const sqlRelevancia = `
             SELECT producto, descripcion, tipo, precio_minimo, (cantidad_existencia + cantidad_existencia_almacen) as stock_total, cantidad_fabricando
             FROM tab_productos 
-            WHERE ${orConditions.join(" OR ")} 
+            WHERE activo = 'si' AND (COALESCE(cantidad_existencia,0) + COALESCE(cantidad_existencia_almacen,0) > 0 OR COALESCE(cantidad_fabricando,0) > 0) AND (${orConditions.join(" OR ")})
             HAVING (${relevanceSQL}) >= ? 
             ORDER BY ${relevanceSQL} DESC 
             LIMIT 8`;
@@ -413,7 +1031,7 @@ async function buscarProductoPorTexto(texto) {
 
     if (minRelevance > 1 && palabrasBase.length > 1) {
         try {
-            const sqlCatchall = `SELECT producto, descripcion, tipo, precio_minimo, (cantidad_existencia + cantidad_existencia_almacen) as stock_total, cantidad_fabricando FROM tab_productos WHERE ${orConditions.join(" OR ")} HAVING (${relevanceSQL}) >= 1 ORDER BY ${relevanceSQL} DESC LIMIT 8`;
+            const sqlCatchall = `SELECT producto, descripcion, tipo, precio_minimo, (cantidad_existencia + cantidad_existencia_almacen) as stock_total, cantidad_fabricando FROM tab_productos WHERE activo = 'si' AND (COALESCE(cantidad_existencia,0) + COALESCE(cantidad_existencia_almacen,0) > 0 OR COALESCE(cantidad_fabricando,0) > 0) AND (${orConditions.join(" OR ")}) HAVING (${relevanceSQL}) >= 1 ORDER BY ${relevanceSQL} DESC LIMIT 8`;
             const [rows] = await pool.execute(sqlCatchall, [...orParams]);
             if (rows.length > 0) return rows;
         } catch (e) {
@@ -423,6 +1041,91 @@ async function buscarProductoPorTexto(texto) {
 
     return null;
 }
+
+// ===== MULTI-ITEM ORDER FUNCTIONS =====
+
+function parseMultiItemMessage(rawText) {
+    if (!rawText || rawText.length < 10 || rawText.length > 1000) return null;
+    let text = rawText.replace(/\s+y\s+/gi, ',').trim();
+    const items = [];
+    const parts = text.split(/(?=\b\d{1,4}\s+[a-zA-ZáéíóúñüÁÉÍÓÚÑÜ])/);
+    for (const part of parts) {
+        const m = part.match(/^\s*(\d{1,4})\s+(.+)/);
+        if (m) {
+            let desc = m[2].trim().replace(/[,\s]+$/g, '').replace(/\s+y\s*$/i, '').trim();
+            if (desc.length > 2) {
+                items.push({ cantidad: parseInt(m[1]), descripcion: desc });
+            }
+        }
+    }
+    const txtNormal = normalizar(rawText);
+    const tieneKeyword = PRODUCT_KEYWORDS.some(kw => txtNormal.includes(kw));
+    return items.length >= 2 && tieneKeyword ? items : null;
+}
+
+async function processMultiItemProduct(from, item, multiOrder) {
+    const pct = await obtenerPorcentaje();
+    multiOrder.pct = pct;
+    const prods = await buscarProductoPorTexto(item.descripcion);
+    if (!prods || prods.length === 0) {
+        multiOrder.resolvedItems.push({ descripcion: item.descripcion, cantidad: item.cantidad, error: true, producto: null });
+        multiOrder.currentIndex++;
+        await processNextMultiItem(from, multiOrder);
+        return;
+    }
+    if (prods.length === 1) {
+        const p = prods[0];
+        const stock = parseFloat(p.stock_total || 0);
+        const fabricando = parseFloat(p.cantidad_fabricando || 0);
+        if (stock <= 0) {
+            // Sin stock: agregar como error indicando fabricación o agotado
+            const motivo = fabricando > 0 ? `🚚 En fabricación/tránsito` : `❌ Agotado`;
+            multiOrder.resolvedItems.push({ descripcion: item.descripcion, cantidad: item.cantidad, codigo: p.producto, error: true, motivo });
+            multiOrder.currentIndex++;
+            await processNextMultiItem(from, multiOrder);
+            return;
+        }
+        const precio = parseFloat(p.precio_minimo || 0) / pct;
+        multiOrder.resolvedItems.push({ descripcion: item.descripcion, cantidad: item.cantidad, codigo: p.producto, tipo: p.tipo, precio: precio, producto: p, error: false });
+        multiOrder.currentIndex++;
+        await processNextMultiItem(from, multiOrder);
+        return;
+    }
+    let msg = `🔍 *Producto ${multiOrder.currentIndex + 1} de ${multiOrder.items.length}:* "${item.descripcion}"\n(Cantidad: ${item.cantidad})\n\n`;
+    prods.slice(0, 8).forEach((p, i) => {
+        const precio = parseFloat(p.precio_minimo || 0) / pct;
+        const stock = parseFloat(p.stock_total || 0);
+        let estado = stock > 0 ? "✅" : (parseFloat(p.cantidad_fabricando || 0) > 0 ? "🚚" : "❌");
+        msg += `*${i+1}.* ${p.producto} — *$${precio.toFixed(2)}* ${estado}\n   ${p.descripcion.substring(0, 55)}${p.descripcion.length > 55 ? '...' : ''}\n`;
+    });
+    msg += `\n📌 Responde el *número* del producto para este ítem.\n_O responde 0 para omitir_`;
+    pendingProductSelection.set(from, { productos: prods.slice(0, 8), pct, multiItem: true });
+    await safeSendMessage(from, { text: msg });
+}
+
+async function processNextMultiItem(from, multiOrder) {
+    if (multiOrder.currentIndex >= multiOrder.items.length) {
+        await showMultiItemQuotation(from, multiOrder);
+        return;
+    }
+    const item = multiOrder.items[multiOrder.currentIndex];
+    await processMultiItemProduct(from, item, multiOrder);
+}
+
+async function showMultiItemQuotation(from, multiOrder) {
+    const okItems = multiOrder.resolvedItems.filter(it => !it.error);
+    const errorItems = multiOrder.resolvedItems.filter(it => it.error);
+    if (okItems.length === 0) {
+        await safeSendMessage(from, { text: "❌ No se pudo identificar ningún producto de tu pedido. Intenta con descripciones más detalladas." });
+        multiItemOrders.delete(from);
+        return;
+    }
+    await setSesionDatos(from, { tipo: 'esperando_cliente_multi', okItems, errorItems, vendedor: multiOrder.vendedor, pushName: multiOrder.pushName, pct: multiOrder.pct });
+    await setModo(from, 'esperando_cliente_multi');
+    multiItemOrders.delete(from);
+    await safeSendMessage(from, { text: `🔍 *Productos identificados.*\n\n❓ *¿Para qué cliente es este pedido?*\nEscriba el nombre o razón social del cliente.` });
+}
+
 async function obtenerDetalleFacturas(id_cliente, id_vendedor = null) {
     let query = `
         SELECT f.id_factura, f.nro_factura, f.total, f.abono_factura, f.fecha_reg, f.porcentaje, f.descuento, f.total_desc,
@@ -503,11 +1206,13 @@ function obtenerNivelRecordatorio(dias) {
     return null;
 }
 
-function obtenerTonoMensaje(nivel, f, monto, fecha) {
+function obtenerTonoMensaje(nivel, f, monto, fecha, dias) {
+    const saldoDivisas = parseFloat(f.total) - parseFloat(f.abono_factura || 0);
+    const bcv = monto;
     if (nivel >= 60) {
-        return `🧾 *AVISO DE PAGO PENDIENTE*\n\nHola *${f.nombres}*, la factura *N° ${f.nro_factura}* emitida el *${fecha}* ya superó los 60 días de vencida con un saldo de *$${monto.toFixed(2)}*.\n\nEl retraso en el pago afecta la rotación de nuestros productos y la disponibilidad de inventario para todos nuestros clientes. Le agradecemos realizar el pago a la mayor brevedad posible.\n\nQuedamos a su disposición para cualquier duda o gestión. 🚗`;
+        return pickTemplate(MESSAGE_TEMPLATES.cobranza60)(f.nombres, f.nro_factura, saldoDivisas.toFixed(2), dias, bcv.toFixed(2));
     }
-    return `🧾 *RECORDATORIO DE PAGO*\n\nHola *${f.nombres}*, le recordamos amablemente que la factura *N° ${f.nro_factura}* con fecha *${fecha}* presenta un saldo pendiente de *$${monto.toFixed(2)}*.\n\nLe agradecemos gestionar el pago para mantener su cuenta al día. Estamos a su disposición para cualquier consulta. 🚗`;
+    return `🧾 *RECORDATORIO DE PAGO*\n\nHola *${f.nombres}*, le recordamos amablemente que la factura *N° ${f.nro_factura}* con fecha *${fecha}* presenta un saldo pendiente de *$${saldoDivisas.toFixed(2)}* en divisas (*Bs. ${bcv.toFixed(2)}* a tasa BCV).\n\nLe agradecemos gestionar el pago para mantener su cuenta al día. Estamos a su disposición para cualquier consulta. 🚗`;
 }
 
 async function checkFacturasVencidas() {
@@ -534,12 +1239,12 @@ async function checkFacturasVencidas() {
             if (!yaEnviado) {
                 const jid = formatWhatsApp(f.celular);
                 if (jid) {
-                    const msg = obtenerTonoMensaje(nivel, f, monto, fecha);
+                    const msg = obtenerTonoMensaje(nivel, f, monto, fecha, dias);
                     await safeSendMessage(jid, { text: msg });
                 }
                 await notificador.marcarRecordatorio(f.id_factura, nivel);
                 cont++;
-                await sleep(1000);
+                await humanDelay(15, 35);
             }
         }
 
@@ -606,7 +1311,7 @@ async function checkVendedoresRecordatorio(force = false) {
             if (!v.jid || v.facturas.length === 0) continue;
             const msg = `📢 *RESUMEN DE CLIENTES VENCIDOS*\n\nVendedor: *${v.nombre}*\n\n${v.facturas.join('\n')}\n\nLe recordamos la importancia de gestionar estos cobros para mantener la rotación de productos.`;
             await safeSendMessage(v.jid, { text: msg });
-            await sleep(1500);
+            await humanDelay(15, 30);
         }
 
         if (!force) {
@@ -827,6 +1532,10 @@ async function checkEstadisticasVendedores(force = false) {
     }
 }
 
+// ===== CONFIGURACIÓN DE ENVÍOS =====
+const SEND_DEFAULTS = { batchSize: 10, pauseSend: 30000, pauseBatch: 600000 };
+let sendConfig = { ...SEND_DEFAULTS };
+
 // ===== BOT WHATSAPP =====
 async function startBot() {
     if (socketBot) {
@@ -845,7 +1554,7 @@ async function startBot() {
         auth: state,
         logger: pino({ level: 'silent' }),
         printQRInTerminal: false,
-        browser: ["ONE4CARS MASTER", "Chrome", "1.0.0"]
+        browser: getBrowser()
     });
 
     socketBot = sock;
@@ -871,8 +1580,24 @@ async function startBot() {
             }
         }
         if (connection === 'close') {
-            const r = (lastDisconnect.error instanceof Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
-            if (r) setTimeout(() => startBot(), 5000);
+            const statusCode = (lastDisconnect?.error instanceof Boom)?.output?.statusCode;
+            const errorMsg = lastDisconnect?.error?.message || '';
+            const esLoggedOut = statusCode === DisconnectReason.loggedOut;
+            const esBadSession = errorMsg.includes('Bad MAC') || errorMsg.includes('Unsupported state') || errorMsg.includes('unable to authenticate');
+            if (esBadSession) {
+                console.log("[BOT] Sesión corrupta, limpiando auth_info y generando nuevo QR...");
+                try {
+                    const authDir = path.join(process.cwd(), 'auth_info');
+                    if (fs.existsSync(authDir)) {
+                        fs.rmSync(authDir, { recursive: true, force: true });
+                    }
+                } catch (e) {}
+                qrCodeData = "Iniciando...";
+            }
+            if (!esLoggedOut) {
+                const delay = esBadSession ? 10000 : 5000;
+                setTimeout(() => startBot(), delay);
+            }
         }
     });
 
@@ -893,10 +1618,16 @@ async function startBot() {
                 if (textMe === '!bot') {
                     await setModo(from, 'bot');
                     await safeSendMessage(from, { text: "🤖 Bot reactivado para este chat." });
-                } else {
-                    await setModo(from, 'humano');
+                    return;
                 }
-                return;
+                // Solo procesar fromMe si es auto-chat (admin hablando consigo mismo)
+                const botPhone = (socketBot?.user?.id || '').split('@')[0].split(':')[0];
+                const fromPhone = from.split('@')[0].split(':')[0];
+                if (botPhone && botPhone !== fromPhone) {
+                    await setModo(from, 'humano');
+                    console.log(`[SILENT] Bot silenciado para ${from.split('@')[0]} (admin conversando con cliente)`);
+                    return;
+                }
             }
 
             const pushName = msg.pushName || "Usuario";
@@ -904,13 +1635,127 @@ async function startBot() {
             if (!rawText) return;
 
             const text = normalizar(rawText);
+
+            // Extraer nombre del cliente si se presenta (ej: "Hola Juan", "soy Pedro", "me llamo Carlos")
+            let nombreExtraido = null;
+            const nameMatch = rawText.match(/(?:hola|buenas|buen[ao]s?|soy|me llamo|mi nombre es|saludos?)\s+([A-Za-zÁÉÍÓÚáéíóúñÑ]{3,})/i);
+            if (nameMatch) {
+                const rawName = nameMatch[1].toLowerCase();
+                const skipWords = ['dias', 'día', 'días', 'tardes', 'noches', 'saludos', 'saludo', 'buenos', 'buenas', 'buen', 'como', 'que', 'tal'];
+                if (!skipWords.includes(rawName.normalize("NFD").replace(/[\u0300-\u036f]/g, ""))) {
+                    nombreExtraido = nameMatch[1].charAt(0).toUpperCase() + nameMatch[1].slice(1).toLowerCase();
+                }
+            }
             
             const textoLimpioParaRif = rawText.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
             const esRIFPuro = /^[VJGE]\d{8,9}$/.test(textoLimpioParaRif);
 
             await guardarMensaje(from, 'user', rawText);
             const sesion = await getSesion(from);
-            if (sesion && sesion.modo === 'humano' && !isAdmin) return;
+            let nombreAlmacenado = null;
+            if (sesion && sesion.datos) {
+                try { const d = JSON.parse(sesion.datos); nombreAlmacenado = d.nombre_cliente || null; } catch(e) {}
+            }
+
+            // Guardar nombre extraído para futuras conversaciones
+            if (nombreExtraido && !nombreAlmacenado) {
+                let datosActuales = {};
+                try { if (sesion?.datos) datosActuales = JSON.parse(sesion.datos); } catch(e) {}
+                if (!datosActuales.nombre_cliente) {
+                    datosActuales.nombre_cliente = nombreExtraido;
+                    await pool.execute(
+                        "INSERT INTO control_chat (telefono, datos, modo) VALUES (?, ?, 'bot') ON DUPLICATE KEY UPDATE datos = ?",
+                        [from, JSON.stringify(datosActuales), JSON.stringify(datosActuales)]
+                    );
+                    nombreAlmacenado = nombreExtraido;
+                }
+            }
+
+            if (sesion && sesion.modo === 'humano' && !isAdmin) {
+                if (sesion.updated_at && (Date.now() - new Date(sesion.updated_at).getTime()) > REACTIVAR_BOT_MS) {
+                    await setModo(from, 'bot');
+                    console.log(`[AUTO-REACT] ${from.split('@')[0]} reactivado tras ${REACTIVAR_BOT_MS/3600000}h sin actividad humana.`);
+                } else {
+                    return;
+                }
+            }
+
+            // --- 0. BIENVENIDA PRIMERA VEZ + SALUDO ---
+            if (!sesion) {
+                // Si es lista de precios/catálogo, agradecer en lugar de bienvenida
+                if (/\b(lista\s*de\s*precios|catalogo|catálogo|listado)\b/i.test(rawText)) {
+                    const nomProv = nombreExtraido || pushName || "Proveedor";
+                    await safeSendMessage(from, { text: `📥 *${nomProv}*, hemos recibido su lista de precios. Agradecemos su comunicación y la estaremos revisando. ¡Gracias por contactarnos! 🙏` });
+                    return;
+                }
+                await guardarUsuario(from, pushName, 0);
+                const msg = `🎉 *¡Bienvenido a ONE4CARS, ${pushName}!* 🎉\n\nSomos *Juan* y *José*, sus asesores de confianza en autopartes. Estamos aquí para ayudarlo con todo lo que necesite, desde filtros y frenos hasta piezas especializadas.\n\n¿En qué podemos servirle el día de hoy? _Escriba la palabra *Menú* para más opciones e información._`;
+                await safeSendMessage(from, { text: msg });
+                return;
+            }
+
+            const esSaludo = text === 'menu' || text.startsWith('menu ') ||
+                             text === 'hola' || text.startsWith('hola ') || text.startsWith('hola,') ||
+                             text === 'saludo' || text.startsWith('saludo ') ||
+                             text === 'saludos' || text.startsWith('saludos ') ||
+                             text === 'buen dia' || text.startsWith('buen dia ') ||
+                             text === 'buenos dias' || text.startsWith('buenos dias ') ||
+                             text === 'buenas tardes' || text.startsWith('buenas tardes ') ||
+                             text === 'buenas noches' || text.startsWith('buenas noches ') ||
+                             text === 'buenas' || text.startsWith('buenas ') ||
+                             text === 'que tal' || text.startsWith('que tal ') ||
+                             text === 'qué tal' || text.startsWith('qué tal ');
+
+            // Si el mensaje contiene pedido/cotización, no tratarlo como saludo
+            const esCotizar = /\bcotiza(?:r|me|íme)\b/i.test(rawText);
+            const tieneCodigosProducto = (rawText.match(/[A-Za-z]{2,}\d{2,}/g) || []).length > 0;
+            const tieneCantidadDescripcion = /\b\d{1,4}\s+[A-Za-zÁÉÍÓÚáéíóúñÑ]{4,}/.test(rawText);
+            const esOtraIntencion = esCotizar || tieneCodigosProducto || tieneCantidadDescripcion ||
+                /\b(pago|pagos|factura|abono|deuda|saldo|cobro|cobranza|vendedor|lista\s*de\s*precios|catalogo|catálogo)\b/i.test(rawText) ||
+                detectarVisita(rawText, text);
+
+            // Si es saludo con otra intención, dar bienvenida a cotizaciones antes de procesar
+            if (esSaludo && esOtraIntencion) {
+                const nombreUsuario = nombreAlmacenado || nombreExtraido || (vendedor ? vendedor.nombre : null) || pushName || "Usuario";
+                await safeSendMessage(from, { text: `👋 ¡Bienvenido al sistema de cotizaciones de ONE4CARS, *${nombreUsuario}*! Estamos procesando su solicitud...` });
+            }
+
+            if (esSaludo && !esOtraIntencion) {
+                const nombreUsuario = nombreAlmacenado || nombreExtraido || (vendedor ? vendedor.nombre : null) || pushName || "Usuario";
+                const mencionaJuan = text.includes('juan');
+                const mencionaJose = text.includes('jos');
+                const saludoBase = text.startsWith('buenas tardes') ? 'tarde' :
+                                   text.startsWith('buenas noches') ? 'noche' : 'dia';
+
+                if (text.startsWith('menu')) {
+                    await safeSendMessage(from, { text: `📋 *MENÚ PRINCIPAL ONE4CARS*\n\n${MENU_TEXT}` });
+                } else if (mencionaJuan) {
+                    await safeSendMessage(from, { text: `¡Buen${saludoBase === 'dia' ? 'os' : 'as'} ${saludoBase}, *${nombreUsuario}*! 🙌\n\n*Juan* no está disponible en este momento, pero yo puedo atenderle con todo gusto. Somos el mismo equipo ONE4CARS y estamos para servirle.\n\n_Escriba la palabra *Menú* para más opciones e información._` });
+                } else if (mencionaJose) {
+                    await safeSendMessage(from, { text: `¡Buen${saludoBase === 'dia' ? 'os' : 'as'} ${saludoBase}, *${nombreUsuario}*! 🙌\n\n*José* no está disponible en este momento, pero yo puedo atenderle con todo gusto. Somos el mismo equipo ONE4CARS y estamos para servirle.\n\n_Escriba la palabra *Menú* para más opciones e información._` });
+                } else {
+                    const respuestas = {
+                        'dia': `¡Buenos días, *${nombreUsuario}*! Dios le bendiga. Es un gusto tenerle por aquí. 🙏\n\n¿En qué podemos servirle el día de hoy? _Escriba la palabra *Menú* para más opciones e información._`,
+                        'tarde': `¡Buenas tardes, *${nombreUsuario}*! Un placer saludarle. Que tenga una bendecida tarde. 😊\n\n¿Cómo podemos ayudarle? _Escriba la palabra *Menú* para más opciones e información._`,
+                        'noche': `¡Buenas noches, *${nombreUsuario}*! Dios le bendiga. Que descanse. 🌙\n\n¿En qué podemos ayudarle? _Escriba la palabra *Menú* para más opciones e información._`
+                    };
+                    await safeSendMessage(from, { text: respuestas[saludoBase] });
+                }
+
+                // Guardar nombre del cliente si fue extraído del saludo
+                if (nombreExtraido && !nombreAlmacenado) {
+                    let datosActuales = {};
+                    try { if (sesion?.datos) datosActuales = JSON.parse(sesion.datos); } catch(e) {}
+                    if (!datosActuales.nombre_cliente) {
+                        datosActuales.nombre_cliente = nombreExtraido;
+                        await pool.execute(
+                            "INSERT INTO control_chat (telefono, datos, modo) VALUES (?, ?, 'bot') ON DUPLICATE KEY UPDATE datos = ?",
+                            [from, JSON.stringify(datosActuales), JSON.stringify(datosActuales)]
+                        );
+                    }
+                }
+                return;
+            }
 
             // --- 1. LÓGICA DE RIF (ADMINISTRADORES) ---
             if (esRIFPuro) {
@@ -942,6 +1787,68 @@ async function startBot() {
                 }
             }
 
+            // --- 1b. SELECCIÓN DE PRODUCTO (antes del menú para evitar conflicto con números) ---
+            const pendingSel = pendingProductSelection.get(from);
+            if (pendingSel && /^\d{1,2}$/.test(text)) {
+                const idx = parseInt(text) - 1;
+                // Multi-item selection handling
+                if (pendingSel.multiItem) {
+                    const multiOrder = multiItemOrders.get(from);
+                    if (multiOrder) {
+                        if (idx >= 0 && idx < pendingSel.productos.length) {
+                            const p = pendingSel.productos[idx];
+                            const pct = pendingSel.pct;
+                            pendingProductSelection.delete(from);
+                            const precio = parseFloat(p.precio_minimo || 0) / pct;
+                            multiOrder.resolvedItems.push({ descripcion: multiOrder.items[multiOrder.currentIndex].descripcion, cantidad: multiOrder.items[multiOrder.currentIndex].cantidad, codigo: p.producto, tipo: p.tipo, precio: precio, error: false });
+                            multiOrder.currentIndex++;
+                            await processNextMultiItem(from, multiOrder);
+                        } else {
+                            pendingProductSelection.delete(from);
+                            multiOrder.resolvedItems.push({ descripcion: multiOrder.items[multiOrder.currentIndex].descripcion, cantidad: multiOrder.items[multiOrder.currentIndex].cantidad, error: true });
+                            multiOrder.currentIndex++;
+                            await processNextMultiItem(from, multiOrder);
+                        }
+                        return;
+                    }
+                }
+                // Original single-product selection
+                if (idx >= 0 && idx < pendingSel.productos.length) {
+                    const p = pendingSel.productos[idx];
+                    const pct = pendingSel.pct;
+                    pendingProductSelection.delete(from);
+                    const precio = parseFloat(p.precio_minimo || 0) / pct;
+                    let infoStock = "";
+                    if (parseFloat(p.stock_total || 0) <= 0) {
+                        const fab = parseFloat(p.cantidad_fabricando || 0);
+                        infoStock = fab > 0 ? "\n🚚 *Sin existencia, en tránsito desde fábrica*" : "";
+                    } else { infoStock = "\n✅ *Disponible*"; }
+                    const caption = `📦 *CÓDIGO: ${p.producto}*\n💰 *Precio: $${precio.toFixed(2)} (Pagadero a tasa BCV)*${infoStock}\n📝 ${p.descripcion}\n🔗 Ficha: https://one4cars.com/producto_general.php?cod=${p.producto}&tipo=${encodeURIComponent(p.tipo)}`;
+                    const imgUrl = `https://one4cars.com/imagen/${p.producto}.jpg`;
+                    try {
+                        await socketBot.sendMessage(from, { image: { url: imgUrl }, caption: caption });
+                    } catch (imgErr) {
+                        await safeSendMessage(from, { text: caption });
+                    }
+                    return;
+                }
+            }
+            
+            // --- 1c. REMINDER/CANCEL FOR PENDING MULTI-ITEM ---
+            if (multiItemOrders.has(from)) {
+                if (text === 'cancelar') {
+                    multiItemOrders.delete(from);
+                    const psel = pendingProductSelection.get(from);
+                    if (psel && psel.multiItem) pendingProductSelection.delete(from);
+                    await safeSendMessage(from, { text: "❌ Pedido cancelado." });
+                    return;
+                }
+                if (!/^\d{1,2}$/.test(text)) {
+                    await safeSendMessage(from, { text: "⚠️ Tienes un pedido pendiente. Responde el *número* del producto, o escribe *cancelar*." });
+                    return;
+                }
+            }
+
             // --- 2. DETECCIÓN INTELIGENTE DEL MENÚ ---
             const menuOption = detectarIntencionMenu(text);
             if (menuOption) {
@@ -963,19 +1870,90 @@ async function startBot() {
                     listado += `💰 *TOTAL A PAGAR: $${totalP.toFixed(2)}*`;
                     return await safeSendMessage(from, { text: listado });
                 }
+                if (menuOption.includes('Asesor Humano') && detectarVisita(rawText, text)) {
+                    let infoCliente = { nombres: pushName, celular: from.split('@')[0] };
+                    if (sesion?.id_cliente_int) {
+                        const c = await pool.execute("SELECT * FROM tab_clientes WHERE id_cliente = ?", [sesion.id_cliente_int]);
+                        if (c[0] && c[0][0]) infoCliente = c[0][0];
+                    } else {
+                        const c = await buscarClientePorTelefono(from.split('@')[0]);
+                        if (c) infoCliente = c;
+                    }
+                    await guardarVisita(from, {
+                        id_cliente: sesion?.id_cliente_int || infoCliente.id_cliente || 0,
+                        nombres: infoCliente.nombres || pushName,
+                        celular: infoCliente.celular || from.split('@')[0],
+                        telefono: infoCliente.telefono || '',
+                        direccion: infoCliente.direccion || '',
+                        zona: infoCliente.zona || '',
+                        rif: infoCliente.rif || '',
+                        id_vendedor: vendedor?.id_vendedor || 0,
+                        nombre_vendedor: vendedor?.nombre || '',
+                        motivo: 'Solicitud de visita: ' + rawText.substring(0, 100),
+                        acuerdo_visita: new Date()
+                    });
+                    const adminJids = ADMIN_IDS.map(id => formatWhatsApp(id)).filter(Boolean);
+                    for (const aj of adminJids) {
+                        await safeSendMessage(aj, { text: `📢 *VISITA SOLICITADA DESDE MENSAJE*\nCliente: ${infoCliente.nombres || pushName}\nTel: ${from.split('@')[0]}\nMensaje: ${rawText.substring(0, 200)}` });
+                    }
+                    const respExtendida = `${menuOption}\n\n📅 *Nota:* Hemos detectado que solicitas una visita. La hemos agendado automáticamente para que un operador te contacte pronto.`;
+                    return await safeSendMessage(from, { text: respExtendida });
+                }
+                if (menuOption === 'VISITAS_HOY') {
+                    const hoyStr = new Date().toISOString().split('T')[0];
+                    try {
+                        const [vis] = await pool.execute("SELECT a.id_agenda, a.hora, c.nombres, c.celular, c.zona, c.direccion FROM tab_agenda_visitas a JOIN tab_clientes c ON a.id_cliente = c.id_cliente WHERE a.fecha = ? AND (a.estado IN ('pendiente','no_contesto','ausente','pospuso') OR a.estado IS NULL) ORDER BY c.zona, c.nombres", [hoyStr]);
+                        if (vis.length === 0) return await safeSendMessage(from, { text: `📅 *Visitas de Hoy (${hoyStr})*\n\n✅ No hay visitas pendientes para hoy.` });
+                        const zonas = [...new Set(vis.map(v => v.zona))];
+                        let reporte = `📅 *Visitas de Hoy (${hoyStr})*\nTotal: *${vis.length}* | Zonas: *${zonas.length}*\n\n`;
+                        let zonaAct = '';
+                        vis.forEach((v, i) => {
+                            if (v.zona !== zonaAct) { zonaAct = v.zona; reporte += `\n📍 *${zonaAct || 'Sin zona'}*\n`; }
+                            reporte += `  ${i+1}. ${v.nombres} ${v.hora ? '🕐'+v.hora.substring(0,5) : ''}\n     📞 ${v.celular || '—'}\n`;
+                        });
+                        reporte += `\n🔗 ${process.env.BASE_URL || 'https://bot-whatsapp-gratis1.onrender.com'}/visitas?fecha=${hoyStr}`;
+                        return await safeSendMessage(from, { text: reporte });
+                    } catch (e) {
+                        console.log("[VISITAS HOY] Error:", e.message);
+                        return await safeSendMessage(from, { text: "❌ Error al obtener el reporte de visitas." });
+                    }
+                }
                 return await safeSendMessage(from, { text: menuOption });
             }
 
             // --- 3. LÓGICA DE PAGOS ---
-            if (text === 'pago fact' || text === 'abono'  || text.includes('pago') || text.includes('al señor oscar') || text.includes('envié el pago') || text.includes('adjunto pago')) {
-                const nombreUsuario = vendedor ? vendedor.nombre : pushName;
-                const saludoCordial = `¡Hola *${nombreUsuario}*! Gracias por su mensaje. 😊\n\nRecibido tu mensaje, administración validará su pago a la brevedad.\n\n${MENU_TEXT}`;
-                return await safeSendMessage(from, { text: saludoCordial });
+            const MEDIOS_PAGO_KEYWORDS = ['envieme la cuenta', 'envíeme la cuenta', 'envieme el pago movil', 'envíeme el pago móvil', 'cual es su cuenta', 'cuál es su cuenta', 'cual es su pago movil', 'cuál es su pago móvil', 'numero de cuenta', 'número de cuenta', 'pago movil', 'pago móvil', 'medios de pago', 'cuenta para pagar', 'como puedo pagar', 'cómo puedo pagar', 'datos bancarios', 'datos de pago'];
+            const PAGAR_KEYWORDS = ['como hago para pagar', 'cómo hago para pagar', 'quiero pagar', 'envieme el vendedor por el pago', 'envíeme el vendedor por el pago', 'aca tengo el dinero', 'acá tengo el dinero', 'pago fact', 'abono', 'al señor oscar', 'envié el pago', 'adjunto pago'];
+            const esMediosPago = MEDIOS_PAGO_KEYWORDS.some(k => rawText.toLowerCase().includes(k) || text.includes(k));
+            const esPagarAhora = PAGAR_KEYWORDS.some(k => rawText.toLowerCase().includes(k) || text.includes(k)) || (text.includes('pago') && !esMediosPago);
+            let nombreCliente = vendedor ? vendedor.nombre : null;
+            if (!nombreCliente) {
+                const cliente = await buscarClientePorTelefono(from.split('@')[0]);
+                if (cliente) nombreCliente = cliente.nombres;
+            }
+            if (!nombreCliente) nombreCliente = pushName;
+            if (esMediosPago) {
+                const msg = `¡Hola *${nombreCliente}*! 😊
+
+Aquí tiene nuestros datos de pago:
+
+1️⃣ *Medios de pago:* https://www.one4cars.com/medios_de_pago.php/`;
+                return await safeSendMessage(from, { text: msg });
+            }
+            if (esPagarAhora) {
+                const msg = `¡Hola *${nombreCliente}*! 😊
+
+Hemos recibido su notificación de pago, administración lo validará a la brevedad.
+
+Mientras tanto, puede consultar el detalle de sus facturas pendientes aquí:
+
+2️⃣ *Estado de cuenta:* https://www.one4cars.com/estado_de_cuenta.php/`;
+                return await safeSendMessage(from, { text: msg });
             }
 
             if (text === 'factura fiscal'  || text.includes('factura con iva')  ) {
                 const nombreUsuario = vendedor ? vendedor.nombre : pushName;
-                const saludoCordial = `¡Hola *${nombreUsuario}*! Gracias por su mensaje. 😊\n\nLa Factura Fiscal será realizada de acuerdo con su solicitud el día que tenga disponibilidad de hacer el pago.\n\n${MENU_TEXT}`;
+                const saludoCordial = `¡Hola *${nombreUsuario}*! Gracias por su mensaje. 😊\n\nLa Factura Fiscal será realizada de acuerdo con su solicitud el día que tenga disponibilidad de hacer el pago.\n\n_Escriba la palabra *Menú* para más opciones e información._`;
                 return await safeSendMessage(from, { text: saludoCordial });
             }
 
@@ -983,17 +1961,17 @@ async function startBot() {
             const lineas = rawText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
             const itemsPedido = [];
             for (const linea of lineas) {
-                let match = linea.match(/^\s*([A-Za-z0-9]{3,})(?:\s+[-=]?\s*|[-=]\s*)(\d{1,4})\s*$/);
+                let match = linea.match(/^\s*([A-Za-z0-9]{3,})(?:\s+[-=./]?\s*|[-=./]\s*)(\d{1,4})(?:\s+(?:piezas?|und|unidad(?:es)?|uds?|unid\.?))?\s*$/i);
                 if (match) {
                     itemsPedido.push({ codigo: match[1].toUpperCase(), cantidad: parseInt(match[2]) });
                     continue;
                 }
-                match = linea.match(/^\s*(\d{1,4})(?:\s+[-=]?\s*|[-=]\s*)([A-Za-z0-9]{3,})\s*$/);
+                match = linea.match(/^\s*(\d{1,4})(?:\s+[-=./]?\s*|[-=./]\s*)([A-Za-z0-9]{3,})(?:\s+(?:piezas?|und|unidad(?:es)?|uds?|unid\.?))?\s*$/i);
                 if (match) {
                     itemsPedido.push({ codigo: match[2].toUpperCase(), cantidad: parseInt(match[1]) });
                     continue;
                 }
-                match = linea.match(/^\s*([A-Za-z0-9]{3,})\s*$/);
+                match = linea.match(/^\s*([A-Za-z0-9]{3,})(?:\s+(?:piezas?|und|unidad(?:es)?|uds?|unid\.?))?\s*$/i);
                 if (match) {
                     const cod = match[1].toUpperCase();
                     if (/[A-Z]/.test(cod) && /[0-9]/.test(cod)) {
@@ -1001,13 +1979,56 @@ async function startBot() {
                     }
                     continue;
                 }
-                match = linea.match(/^\s*(.+?)\s+[-=]?\s*(\d{1,4})\s*$/);
+                match = linea.match(/^\s*(?:.+?\s+)?(\d{1,4})\s+(?:del|de|lote|piezas?\s+del?)\s+([A-Za-z0-9]{3,})(?:\s+.+)?\s*$/i);
+                if (match) {
+                    itemsPedido.push({ codigo: match[2].toUpperCase(), cantidad: parseInt(match[1]) });
+                    continue;
+                }
+                match = linea.match(/^\s*(?:.+?\s+)?([A-Za-z0-9]{3,})\s+(?:del|de)\s+(\d{1,4})(?:\s+.+)?\s*$/i);
+                if (match) {
+                    itemsPedido.push({ codigo: match[1].toUpperCase(), cantidad: parseInt(match[2]) });
+                    continue;
+                }
+                match = linea.match(/^\s*(.+?)\s+[-=./]?\s*(\d{1,4})(?:\s+(?:piezas?|und|unidad(?:es)?|uds?|unid\.?))?\s*$/i);
                 if (match && match[1].length >= 4) {
                     const txtDesc = match[1].trim();
                     const qty = parseInt(match[2]);
-                    const prodDesc = await buscarProductoPorTexto(txtDesc);
-                    if (prodDesc && prodDesc.length > 0) {
-                        itemsPedido.push({ codigo: prodDesc[0].producto, cantidad: qty });
+                    let foundByCode = null;
+                    const palabrasDesc = txtDesc.split(/\s+/);
+                    for (const pd of palabrasDesc) {
+                        const codCandidato = pd.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+                        if (codCandidato.length >= 4 && /[A-Z]/.test(codCandidato) && /[0-9]/.test(codCandidato)) {
+                            foundByCode = await buscarProductoPorCodigo(codCandidato);
+                            if (foundByCode) break;
+                        }
+                    }
+                    if (foundByCode) {
+                        itemsPedido.push({ codigo: foundByCode[0].producto, cantidad: qty });
+                    } else {
+                        const prodDesc = await buscarProductoPorTexto(txtDesc);
+                        if (prodDesc && prodDesc.length > 0) {
+                            itemsPedido.push({ codigo: prodDesc[0].producto, cantidad: qty });
+                        }
+                    }
+                }
+            }
+            // Fallback: escanear patrones cantidad+código en todo el texto (ignorando palabras extra)
+            if (itemsPedido.length === 0) {
+                const codePat1 = /(\d{1,4})\s+([A-Za-z]{2,}\d{2,})/g;
+                let match;
+                while ((match = codePat1.exec(rawText)) !== null) {
+                    const cod = match[2].toUpperCase();
+                    if (!itemsPedido.some(it => it.codigo === cod)) {
+                        itemsPedido.push({ codigo: cod, cantidad: parseInt(match[1]) });
+                    }
+                }
+                if (itemsPedido.length === 0) {
+                    const codePat2 = /([A-Za-z]{2,}\d{2,})\s+(\d{1,4})/g;
+                    while ((match = codePat2.exec(rawText)) !== null) {
+                        const cod = match[1].toUpperCase();
+                        if (!itemsPedido.some(it => it.codigo === cod)) {
+                            itemsPedido.push({ codigo: cod, cantidad: parseInt(match[2]) });
+                        }
                     }
                 }
             }
@@ -1015,10 +2036,145 @@ async function startBot() {
             const tieneCantidadExplicita = itemsPedido.length === 1 && itemsPedido[0].cantidad !== 1;
             if (tieneMultiplesItems || tieneCantidadExplicita) {
                 console.log(`[COTIZACION] Detectado pedido de ${itemsPedido.length} items de ${from}`);
+                if (!vendedor) {
+                    await setSesionDatos(from, { tipo: 'single', itemsPedido: itemsPedido, pushName: pushName });
+                    await setModo(from, 'esperando_vendedor');
+                    await safeSendMessage(from, { text: `🔍 *Detecté un pedido de ${itemsPedido.length} producto(s)*, pero no tengo identificado al vendedor.\n\n❓ *¿Cuál es su nombre como vendedor?*\n\n_Escriba el nombre exacto o *cancelar* para cancelar._` });
+                    return;
+                }
+                const itemsTemp = itemsPedido.map(it => `${it.codigo} ${it.cantidad}`).join(', ');
+                await setSesionDatos(from, { tipo: 'esperando_cliente', itemsPedido: itemsPedido, pushName: pushName, vendedor: vendedor ? { id_vendedor: vendedor.id_vendedor, nombre: vendedor.nombre, celular_vendedor: vendedor.celular_vendedor } : null });
+                await setModo(from, 'esperando_cliente');
+                await safeSendMessage(from, { text: `🔍 *Detecté un pedido de ${itemsPedido.length} producto(s):*\n${itemsTemp}\n\n❓ *¿Para qué cliente es este pedido?*\nEscriba el nombre o razón social del cliente.` });
+                return;
+            }
+
+            // --- ESPERANDO NOMBRE DE VENDEDOR ---
+            if (sesion && sesion.modo === 'esperando_vendedor' && sesion.datos) {
+                let datosSesion = {};
+                try { datosSesion = JSON.parse(sesion.datos); } catch(e) {}
+                const tipo = datosSesion.tipo;
+                const cancelWords = ['no', 'nop', 'cancelar', 'cancela', 'ninguno', 'nunca', 'ningun'];
+                if (cancelWords.includes(text)) {
+                    await clearSesionDatos(from);
+                    await setModo(from, 'bot');
+                    await safeSendMessage(from, { text: "❌ Pedido cancelado." });
+                    return;
+                }
+                const nombreVendedor = rawText.trim();
+                if (nombreVendedor.length < 3) {
+                    await safeSendMessage(from, { text: "❌ Por favor escriba un nombre de vendedor válido (mínimo 3 caracteres)." });
+                    return;
+                }
+                const [rows] = await pool.execute(
+                    "SELECT id_vendedor, nombre, celular_vendedor FROM tab_vendedores WHERE activo = 'SI' AND nombre LIKE ? LIMIT 1",
+                    [`%${nombreVendedor}%`]
+                );
+                if (rows.length === 0) {
+                    await safeSendMessage(from, { text: `❌ No encontré un vendedor llamado "*${nombreVendedor}*" en la base de datos.\n\nPuede que no esté registrado como activo. Contacte a un administrador o escriba otro nombre.\n\nEscriba *cancelar* para cancelar el pedido.` });
+                    return;
+                }
+                const vendedorEncontrado = rows[0];
+                if (tipo === 'multi') {
+                    const multiOrder = {
+                        items: datosSesion.items,
+                        currentIndex: 0,
+                        resolvedItems: [],
+                        pct: null,
+                        vendedor: vendedorEncontrado,
+                        pushName: datosSesion.pushName || pushName
+                    };
+                    multiItemOrders.set(from, multiOrder);
+                    await clearSesionDatos(from);
+                    await setModo(from, 'bot');
+                    await safeSendMessage(from, { text: `✅ Vendedor identificado: *${vendedorEncontrado.nombre}*. Procesando su pedido...` });
+                    await processNextMultiItem(from, multiOrder);
+                    return;
+                } else {
+                    await setSesionDatos(from, {
+                        tipo: 'esperando_cliente',
+                        itemsPedido: datosSesion.itemsPedido,
+                        pushName: datosSesion.pushName,
+                        vendedor: { id_vendedor: vendedorEncontrado.id_vendedor, nombre: vendedorEncontrado.nombre, celular_vendedor: vendedorEncontrado.celular_vendedor }
+                    });
+                    await setModo(from, 'esperando_cliente');
+                    const itemsTemp = datosSesion.itemsPedido.map(it => `${it.codigo} ${it.cantidad}`).join(', ');
+                    await safeSendMessage(from, { text: `✅ Vendedor: *${vendedorEncontrado.nombre}*\n\n🔍 *Pedido de ${datosSesion.itemsPedido.length} producto(s):*\n${itemsTemp}\n\n❓ *¿Para qué cliente es este pedido?*\nEscriba el nombre o razón social del cliente.` });
+                    return;
+                }
+            }
+
+            // --- ESPERANDO NOMBRE DE CLIENTE (después de detectar pedido sin nombre) ---
+            if (sesion && sesion.modo === 'esperando_cliente' && sesion.datos) {
+                let datosSesion = {};
+                try { datosSesion = JSON.parse(sesion.datos); } catch(e) {}
+                const itemsPendientes = datosSesion.itemsPedido;
+                const vendedorSesion = datosSesion.vendedor;
+                if (!itemsPendientes || itemsPendientes.length === 0) {
+                    await clearSesionDatos(from);
+                    await setModo(from, 'bot');
+                    return;
+                }
+                if (!vendedorSesion) {
+                    const nuevosDatos = { tipo: 'single', itemsPedido: itemsPendientes, pushName: datosSesion.pushName };
+                    await setSesionDatos(from, nuevosDatos);
+                    await setModo(from, 'esperando_vendedor');
+                    await safeSendMessage(from, { text: "⚠️ No tengo el vendedor identificado. Por favor escriba su nombre como vendedor." });
+                    return;
+                }
+                const cancelWords = ['no', 'nop', 'cancelar', 'cancela', 'ninguno'];
+                if (cancelWords.includes(text)) {
+                    await clearSesionDatos(from);
+                    await setModo(from, 'bot');
+                    await safeSendMessage(from, { text: "❌ Pedido cancelado." });
+                    return;
+                }
+                const nombreClienteBusqueda = rawText.trim();
+                let clienteEncontrado = null;
+                if (vendedorSesion) {
+                    clienteEncontrado = await buscarClientePorNombreYVendedor(nombreClienteBusqueda, vendedorSesion.nombre);
+                }
+                if (!clienteEncontrado) {
+                    const palabras = nombreClienteBusqueda.toUpperCase().split(/\s+/).filter(p => p.length >= 3);
+                    if (palabras.length > 0) {
+                        clienteEncontrado = await buscarClientePorPalabras(palabras, vendedorSesion?.nombre, nombreClienteBusqueda);
+                    }
+                }
+                if (!clienteEncontrado) {
+                    const palabras = nombreClienteBusqueda.toUpperCase().split(/\s+/).filter(p => p.length >= 3);
+                    if (palabras.length > 0) {
+                        clienteEncontrado = await buscarClientePorPalabras(palabras, undefined, nombreClienteBusqueda);
+                    }
+                }
+                if (!clienteEncontrado) {
+                    await safeSendMessage(from, { text: `❌ No encontré un cliente llamado "*${nombreClienteBusqueda}*".\n\nEscriba el nombre exacto o *cancelar* para cancelar el pedido.` });
+                    return;
+                }
+                const credito = await verificarCreditoCliente(clienteEncontrado.id_cliente);
+                if (credito.tieneVencidas || credito.tieneRetrasos) {
+                    let msgAviso = `⚠️ *AVISO DE CRÉDITO — CLIENTE: ${clienteEncontrado.nombres}*\n\n`;
+                    if (credito.tieneVencidas) {
+                        msgAviso += `🚨 *Facturas vencidas (${credito.facturasVencidas.length}):*\n`;
+                        credito.facturasVencidas.forEach(f => {
+                            msgAviso += `🔹 Factura #${f.nro_factura} — $${f.saldo.toFixed(2)} — ${f.dias_vencida} días de vencida\n`;
+                        });
+                        msgAviso += `\n`;
+                    }
+                    if (credito.tieneRetrasos) {
+                        msgAviso += `⏰ *Retraso en pagos anteriores:*\n`;
+                        credito.facturasRetraso.forEach(f => {
+                            msgAviso += `🔹 Factura #${f.nro_factura} — Plazo de pago: ${f.dias_pago} días\n`;
+                        });
+                        msgAviso += `\n_El cliente presentó un plazo de pago de ${credito.mayorRetraso} días, eso limita su capacidad de crédito._\n\n`;
+                    }
+                    msgAviso += `_Esto requiere que usted lo converse con la gerencia para autorizar este despacho._`;
+                    await safeSendMessage(from, { text: msgAviso });
+                    await sleep(1000);
+                }
                 let itemsOk = [];
                 let errores = [];
                 const pct = await obtenerPorcentaje();
-                for (const item of itemsPedido) {
+                for (const item of itemsPendientes) {
                     const prods = await buscarProductoPorCodigo(item.codigo);
                     if (!prods || prods.length === 0) {
                         errores.push(`❌ *${item.codigo}*: Código no encontrado`);
@@ -1026,29 +2182,105 @@ async function startBot() {
                     }
                     const p = prods[0];
                     const stock = parseFloat(p.stock_total || 0);
+                    const fabricando = parseFloat(p.cantidad_fabricando || 0);
                     if (stock <= 0) {
-                        errores.push(`❌ *${p.producto}*: Sin stock`);
+                        if (fabricando > 0) {
+                            errores.push(`🚚 *${p.producto}*: En fabricación/tránsito`);
+                        } else {
+                            errores.push(`❌ *${p.producto}*: Agotado`);
+                        }
                         continue;
                     }
                     itemsOk.push({ codigo: p.producto, tipo: p.tipo, cantidad: item.cantidad, precio: parseFloat(p.precio_minimo || 0) / pct });
                 }
                 if (itemsOk.length > 0) {
                     let gt = 0;
-                    let msg = `📋 *COTIZACIÓN*\n`;
-                    if (vendedor) msg += `👤 Vendedor: *${vendedor.nombre}*\n\n`;
-                    msg += `💰 *Precios pagaderos a tasa BCV*\n\n`;
-                    itemsOk.forEach(it => { const t = it.precio * it.cantidad; gt += t; msg += `*${it.codigo}* - ${it.tipo || ''}\n   ${it.cantidad} und x $${it.precio.toFixed(2)} = *$${t.toFixed(2)}*\n`; });
-                    msg += `\n*TOTAL GENERAL: $${gt.toFixed(2)}*`;
-                    if (errores.length > 0) msg += `\n\n⚠️ Productos no incluidos:\n${errores.join('\n')}`;
-                    await safeSendMessage(from, { text: msg });
-                    pendientesConfirmacion.set(from, { items: itemsOk, vendedor: vendedor || null, pushName });
+                    let msgCot = `📋 *COTIZACIÓN*\n`;
+                    if (vendedorSesion) msgCot += `👤 Vendedor: *${vendedorSesion.nombre}*\n`;
+                    msgCot += `🏢 Cliente: *${clienteEncontrado.nombres}*\n\n`;
+                    msgCot += `💰 *Precios pagaderos a tasa BCV*\n\n`;
+                    itemsOk.forEach(it => { const t = it.precio * it.cantidad; gt += t; msgCot += `*${it.codigo}* - ${it.tipo || ''}\n   ${it.cantidad} und x $${it.precio.toFixed(2)} = *$${t.toFixed(2)}*\n`; });
+                    msgCot += `\n*TOTAL GENERAL: $${gt.toFixed(2)}*`;
+                    if (errores.length > 0) msgCot += `\n\n⚠️ Productos no incluidos:\n${errores.join('\n')}`;
+                    await safeSendMessage(from, { text: msgCot });
+                    const dataConfirm = { items: itemsOk, vendedor: vendedorSesion || null, pushName: datosSesion.pushName || pushName, cliente: clienteEncontrado };
+                    pendientesConfirmacion.set(from, dataConfirm);
+                    await setSesionDatos(from, { tipo: 'confirmando', items: dataConfirm.items, vendedor: dataConfirm.vendedor, pushName: dataConfirm.pushName, cliente: dataConfirm.cliente });
                     await setModo(from, 'confirmando');
                     await sleep(500);
                     await safeSendMessage(from, { text: `✅ *¿Desea confirmar este pedido?*\n\nResponda *SI* para confirmar o *NO* para cancelar.` });
                 } else {
                     let msg = `⚠️ *No se pudo generar la cotización*\n\n${errores.join('\n')}`;
                     await safeSendMessage(from, { text: msg });
+                    await clearSesionDatos(from);
+                    await setModo(from, 'bot');
                 }
+                return;
+            }
+
+            // --- ESPERANDO NOMBRE DE CLIENTE (para multi-item) ---
+            if (sesion && sesion.modo === 'esperando_cliente_multi' && sesion.datos) {
+                let datosSesion = {};
+                try { datosSesion = JSON.parse(sesion.datos); } catch(e) { console.log("[CLIENTE_MULTI] Error parseando datos:", e.message); }
+                console.log("[CLIENTE_MULTI] Handler alcanzado. modo:", sesion.modo, "texto:", rawText, "pushName:", pushName, "tiene okItems:", Array.isArray(datosSesion.okItems), "tiene itemsPedido:", Array.isArray(datosSesion.itemsPedido));
+                const { okItems, errorItems, vendedor, pushName } = datosSesion;
+                const cancelWords = ['no', 'nop', 'cancelar', 'cancela', 'ninguno', 'nunca'];
+                if (cancelWords.includes(text)) {
+                    await clearSesionDatos(from);
+                    await setModo(from, 'bot');
+                    await safeSendMessage(from, { text: "❌ Pedido cancelado." });
+                    return;
+                }
+                const nombreCliente = rawText.trim();
+                if (nombreCliente.length < 3) {
+                    await safeSendMessage(from, { text: "❌ Por favor escriba un nombre válido." });
+                    return;
+                }
+                let clienteEncontrado = null;
+                if (vendedor) {
+                    clienteEncontrado = await buscarClientePorNombreYVendedor(nombreCliente, vendedor.nombre);
+                }
+                if (!clienteEncontrado && vendedor) {
+                    const palabras = nombreCliente.toUpperCase().split(/\s+/).filter(p => p.length >= 3);
+                    if (palabras.length > 0) {
+                        clienteEncontrado = await buscarClientePorPalabras(palabras, vendedor.nombre, nombreCliente);
+                    }
+                }
+                if (!clienteEncontrado) {
+                    const palabras = nombreCliente.toUpperCase().split(/\s+/).filter(p => p.length >= 3);
+                    if (palabras.length > 0) {
+                        clienteEncontrado = await buscarClientePorPalabras(palabras, undefined, nombreCliente);
+                    }
+                }
+                if (!clienteEncontrado) {
+                    await safeSendMessage(from, { text: `❌ No encontré un cliente llamado "*${nombreCliente}*".\n\nEscriba el nombre exacto o *cancelar* para cancelar el pedido.` });
+                    return;
+                }
+                let gt = 0;
+                let msg = `📋 *COTIZACIÓN*\n`;
+                if (vendedor) msg += `👤 Vendedor: *${vendedor.nombre}*\n`;
+                msg += `🏢 Cliente: *${clienteEncontrado.nombres}*\n\n`;
+                msg += `💰 *Precios pagaderos a tasa BCV*\n\n`;
+                okItems.forEach(it => {
+                    const t = it.precio * it.cantidad;
+                    gt += t;
+                    msg += `*${it.codigo}* - ${it.tipo || ''}\n   ${it.cantidad} und x $${it.precio.toFixed(2)} = *$${t.toFixed(2)}*\n\n`;
+                });
+                msg += `\n*TOTAL GENERAL: $${gt.toFixed(2)}*`;
+                if (errorItems && errorItems.length > 0) {
+                    msg += `\n\n⚠️ Productos no disponibles:\n`;
+                    errorItems.forEach(it => {
+                        if (it.motivo) msg += `🚚 ${it.motivo} — "${it.descripcion}" (${it.cantidad} und)\n`;
+                        else msg += `❌ "${it.descripcion}" (${it.cantidad} und)\n`;
+                    });
+                }
+                await safeSendMessage(from, { text: msg });
+                const dataConfirm = { items: okItems, vendedor, pushName, cliente: clienteEncontrado };
+                pendientesConfirmacion.set(from, dataConfirm);
+                await setSesionDatos(from, { tipo: 'confirmando', items: dataConfirm.items, vendedor: dataConfirm.vendedor, pushName: dataConfirm.pushName, cliente: dataConfirm.cliente });
+                await setModo(from, 'confirmando');
+                await sleep(500);
+                await safeSendMessage(from, { text: `✅ *¿Desea confirmar este pedido?*\n\nResponda *SI* para confirmar o *NO* para cancelar.` });
                 return;
             }
 
@@ -1058,6 +2290,13 @@ async function startBot() {
                 const cancelWords = ['no', 'nop', 'cancelar', 'cancela', 'ninguno', 'nunca'];
                 if (confWords.includes(text)) {
                     const data = pendientesConfirmacion.get(from);
+                    if (!data.vendedor) {
+                        await safeSendMessage(from, { text: "❌ No se identificó al vendedor. Por favor inicie el pedido nuevamente desde cero." });
+                        pendientesConfirmacion.delete(from);
+                        await clearSesionDatos(from);
+                        await setModo(from, 'bot');
+                        return;
+                    }
                     try {
                         const hoy = new Date().toISOString().split('T')[0];
                         const [maxNro] = await pool.execute("SELECT COALESCE(MAX(nro_factura),0)+1 as next FROM tab_pedidos");
@@ -1070,14 +2309,45 @@ async function startBot() {
                             : rawTel;
                         const tot = data.items.reduce((s, it) => s + it.precio * it.cantidad, 0);
                         await pool.execute("INSERT INTO tab_pedidos (nro_factura, fecha_reg, nombres, celular, total, id_vendedor, vendedor, celular_vendedor, pagada, anulado) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'NO', 'no')",
-                            [nro, hoy, data.pushName || 'Cliente', tel, tot, data.vendedor?.id_vendedor || 0, data.vendedor?.nombre || '', data.vendedor?.celular_vendedor || '']);
+                            [nro, hoy, data.cliente?.nombres || data.pushName || 'Cliente', tel, tot, data.vendedor?.id_vendedor || 0, data.vendedor?.nombre || '', data.vendedor?.celular_vendedor || '']);
                         const [pedido] = await pool.execute("SELECT MAX(id_factura) as id FROM tab_pedidos");
                         const idPed = pedido[0].id;
-                        for (let i = 0; i < data.items.length; i++) {
-                            const it = data.items[i];
-                            await pool.execute("INSERT INTO tab_pedidos_reng (id_factura, nro_reglon, producto, cantidad, precio_unitario, precio_total, tipo, fecha_reg) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                                [idPed, i + 1, it.codigo, it.cantidad, it.precio, it.precio * it.cantidad, it.tipo || '', hoy]);
-                        }
+                        const ahora = new Date().toISOString().slice(0, 19).replace('T', ' ');
+                        console.log("[ORDEN] Insertando orden, cliente:", data.cliente?.nombres || data.pushName, "total:", tot, "vendedor:", data.vendedor?.nombre);
+                        try {
+                            const [ordenResult] = await pool.execute(
+                                "INSERT INTO orden (customer_id, cedula, nombres, direccion, celular, id_vendedor, vendedor, total_price, created, modified, status, facturado, pendiente, forma_de_pago, facturar, comentarios) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '1', 'NO', 'NO', '', '', '')",
+                                [data.cliente?.id_cliente || 0, data.cliente?.cedula || '', data.cliente?.nombres || data.pushName || 'Cliente', data.cliente?.direccion || '', tel, data.vendedor?.id_vendedor || 0, data.vendedor?.nombre || '', tot, ahora, ahora]
+                            );
+                            const ordenId = ordenResult.insertId;
+                            console.log("[ORDEN] OK, insertId:", ordenId);
+                            for (let i = 0; i < data.items.length; i++) {
+                                const it = data.items[i];
+                                await pool.execute("INSERT INTO tab_pedidos_reng (id_factura, nro_reglon, producto, cantidad, precio_unitario, precio_total, tipo, fecha_reg) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                                    [idPed, i + 1, it.codigo, it.cantidad, it.precio, it.precio * it.cantidad, it.tipo || '', hoy]);
+                                let idProducto = 0;
+                                let descripcion = '';
+                                try {
+                                    console.log("[ORDEN_ART] Buscando id_producto para:", it.codigo);
+                                    const [prods] = await pool.execute("SELECT id_producto, descripcion FROM tab_productos WHERE producto = ? LIMIT 1", [it.codigo]);
+                                    if (prods.length > 0) {
+                                        idProducto = prods[0].id_producto || 0;
+                                        descripcion = prods[0].descripcion || '';
+                                        console.log("[ORDEN_ART] Encontrado id_producto:", idProducto);
+                                    } else {
+                                        console.log("[ORDEN_ART] Producto no encontrado en tab_productos:", it.codigo);
+                                    }
+                                } catch (e) { console.log("[ORDEN_ART] Error consultando producto:", e.message); }
+                                try {
+                                    console.log("[ORDEN_ART] Insertando articulo ordenId:", ordenId, "producto:", it.codigo, "qty:", it.cantidad, "precio:", it.precio);
+                                    await pool.execute(
+                                        "INSERT INTO orden_articulos (order_id, product_id, producto, descripcion, quantity, precio_unitario, almacen) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                        [ordenId, idProducto, it.codigo, descripcion, it.cantidad, it.precio, '']
+                                    );
+                                    console.log("[ORDEN_ART] OK");
+                                } catch (e) { console.log("[ORDEN_ART] Error insertando:", e.message); }
+                            }
+                        } catch (e) { console.log("[ORDEN] Error:", e.message); }
                         const adminJids = ADMIN_IDS.map(id => formatWhatsApp(id)).filter(Boolean);
                         for (const aj of adminJids) {
                             await safeSendMessage(aj, { text: `📦 *NUEVO PEDIDO CONFIRMADO #${nro}*\nCliente: ${data.pushName || tel}\nTotal: $${tot.toFixed(2)}\nVendedor: ${data.vendedor?.nombre || 'N/A'}\n\n_Ver pedido en el sistema_` });
@@ -1085,56 +2355,240 @@ async function startBot() {
                         await safeSendMessage(from, { text: `✅ *Pedido #${nro} confirmado con éxito!*\n\nUn administrador lo revisará pronto. ¡Gracias por su preferencia! 🙏` });
                     } catch (e) { console.log("[PEDIDO] Error al guardar:", e.message); await safeSendMessage(from, { text: "❌ Ocurrió un error al confirmar el pedido. Intente nuevamente." }); }
                     pendientesConfirmacion.delete(from);
+                    await clearSesionDatos(from);
                     await setModo(from, 'bot');
                     return;
                 } else if (cancelWords.includes(text)) {
                     pendientesConfirmacion.delete(from);
+                    await clearSesionDatos(from);
                     await setModo(from, 'bot');
                     await safeSendMessage(from, { text: "❌ Pedido cancelado." });
                     return;
                 }
             }
 
+            // --- CONFIRMACIÓN DE VISITA ---
+            if (agendaVisitas.has(from) && sesion && sesion.modo === 'visitando') {
+                const dataVisita = agendaVisitas.get(from);
+                const confWords = ['si', 'sí', 'confirmo', 'confirmar', 'dale', 'ok', 'okey', 'claro', 'simon', 'confirmado', 'yes', 'adelante'];
+                const cancelWords = ['no', 'nop', 'cancelar', 'cancela', 'ninguno', 'nunca'];
+
+                if (dataVisita.esperando_fecha) {
+                    const fechaParseada = parsearFechaVisita(rawText);
+                    if (fechaParseada) {
+                        dataVisita.acuerdo_visita = fechaParseada.fecha;
+                        dataVisita.dias_frecuencia = fechaParseada.frecuencia || 0;
+                        dataVisita.esperando_fecha = false;
+                        dataVisita.esperando_confirmacion = true;
+                        const fechaStr = fechaParseada.fecha.toLocaleDateString('es-ES', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+                        let msgFecha = `📅 Entendido, agendaremos la visita para el *${fechaStr}*.`;
+                        if (fechaParseada.frecuencia === 7) msgFecha += `\n🔄 La visita será *semanal* (todos los ${fechaParseada.fecha.toLocaleDateString('es-ES', { weekday: 'long' })}).`;
+                        msgFecha += `\n\n¿Confirmas que deseas agendar esta visita? Responde *SI* para confirmar o *NO* para cancelar.`;
+                        await safeSendMessage(from, { text: msgFecha });
+                    } else if (confWords.includes(text) || cancelWords.includes(text)) {
+                        if (cancelWords.includes(text)) {
+                            agendaVisitas.delete(from);
+                            await clearSesionDatos(from);
+                            await setModo(from, 'bot');
+                            await safeSendMessage(from, { text: "❌ Solicitud de visita cancelada. Si en otro momento necesitas asistencia, aquí estamos." });
+                            return;
+                        }
+                        await safeSendMessage(from, { text: "Por favor, indícame una fecha válida. Ejemplos: *hoy*, *mañana*, *el jueves*, *en 15 días*, *el próximo lunes*." });
+                    } else {
+                        await safeSendMessage(from, { text: "No entendí la fecha. Por favor indícame un día. Ej: *hoy*, *mañana*, *el jueves*, *en 15 días*." });
+                    }
+                    await setSesionDatos(from, { tipo: 'visitando', esperando_fecha: dataVisita.esperando_fecha, esperando_confirmacion: dataVisita.esperando_confirmacion, acuerdo_visita: dataVisita.acuerdo_visita ? dataVisita.acuerdo_visita.toISOString() : null, dias_frecuencia: dataVisita.dias_frecuencia || 0, motivo: dataVisita.motivo, nombres: dataVisita.nombres });
+                    return;
+                }
+
+                if (dataVisita.esperando_confirmacion) {
+                    if (confWords.includes(text)) {
+                        const fechaStr = dataVisita.acuerdo_visita ? dataVisita.acuerdo_visita.toLocaleDateString('es-ES', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }) : 'Pendiente';
+                        let infoCliente = { nombres: dataVisita.nombres || pushName, celular: from.split('@')[0] };
+                        if (sesion?.id_cliente_int) {
+                            const c = await pool.execute("SELECT * FROM tab_clientes WHERE id_cliente = ?", [sesion.id_cliente_int]);
+                            if (c[0] && c[0][0]) {
+                                infoCliente = c[0][0];
+                            }
+                        } else {
+                            const c = await buscarClientePorTelefono(from.split('@')[0]);
+                            if (c) infoCliente = c;
+                        }
+                        const frecuencia = dataVisita.dias_frecuencia || 0;
+                        const exito = await guardarVisita(from, {
+                            id_cliente: sesion?.id_cliente_int || infoCliente.id_cliente || 0,
+                            nombres: infoCliente.nombres || pushName,
+                            celular: infoCliente.celular || from.split('@')[0],
+                            telefono: infoCliente.telefono || '',
+                            direccion: infoCliente.direccion || '',
+                            zona: infoCliente.zona || '',
+                            rif: infoCliente.rif || '',
+                            id_vendedor: vendedor?.id_vendedor || 0,
+                            nombre_vendedor: vendedor?.nombre || '',
+                            motivo: dataVisita.motivo || 'Solicitud de visita por WhatsApp',
+                            acuerdo_visita: dataVisita.acuerdo_visita || new Date(),
+                            dias_frecuencia: frecuencia
+                        });
+                        if (exito) {
+                            let msgExito = `✅ *Visita agendada con éxito!*\n\n📅 Fecha: *${fechaStr}*`;
+                            if (frecuencia === 7) msgExito += `\n🔄 Frecuencia: *Semanal*`;
+                            msgExito += `\n\nUn vendedor lo visitará en la fecha indicada. ¡Gracias por confiar en ONE4CARS! 🙏`;
+                            await safeSendMessage(from, { text: msgExito });
+                            const adminJids = ADMIN_IDS.map(id => formatWhatsApp(id)).filter(Boolean);
+                            for (const aj of adminJids) {
+                                await safeSendMessage(aj, { text: `📢 *NUEVA VISITA AGENDADA*\nCliente: ${infoCliente.nombres || pushName}\nTel: ${from.split('@')[0]}\nFecha: ${fechaStr}\nVendedor: ${vendedor?.nombre || 'Sin asignar'}\nMotivo: ${dataVisita.motivo || 'Solicitud de visita'}` });
+                            }
+                        } else {
+                            await safeSendMessage(from, { text: "❌ Ocurrió un error al agendar la visita. Por favor intenta de nuevo o contacta a un administrador." });
+                        }
+                        agendaVisitas.delete(from);
+                        await clearSesionDatos(from);
+                        await setModo(from, 'bot');
+                    } else if (cancelWords.includes(text)) {
+                        agendaVisitas.delete(from);
+                        await clearSesionDatos(from);
+                        await setModo(from, 'bot');
+                        await safeSendMessage(from, { text: "❌ Solicitud de visita cancelada." });
+                    }
+                    return;
+                }
+            }
+
+            // --- DETECCIÓN DE INTENCIÓN DE VISITA ---
+            if (!esRIFPuro && !menuOption) {
+                const esIntencionVisita = detectarVisita(rawText, text);
+                if (esIntencionVisita) {
+                    const fechaYaParseada = parsearFechaVisita(rawText);
+                    if (fechaYaParseada) {
+                        const dataVisitaDetect = {
+                            esperando_fecha: false,
+                            esperando_confirmacion: true,
+                            acuerdo_visita: fechaYaParseada.fecha,
+                            dias_frecuencia: fechaYaParseada.frecuencia || 0,
+                            motivo: rawText,
+                            nombres: vendedor ? vendedor.nombre : pushName
+                        };
+                        agendaVisitas.set(from, dataVisitaDetect);
+                        await setSesionDatos(from, { tipo: 'visitando', esperando_fecha: false, esperando_confirmacion: true, acuerdo_visita: fechaYaParseada.fecha.toISOString(), dias_frecuencia: fechaYaParseada.frecuencia || 0, motivo: rawText, nombres: dataVisitaDetect.nombres });
+                        await setModo(from, 'visitando');
+                        const fechaStr = fechaYaParseada.fecha.toLocaleDateString('es-ES', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+                        let msgFecha = `Entiendo que deseas agendar una visita. 🚗\n\n📅 Propongo agendar para el *${fechaStr}*.`;
+                        if (fechaYaParseada.frecuencia === 7) msgFecha += `\n🔄 Será una visita *semanal* (todos los ${fechaYaParseada.fecha.toLocaleDateString('es-ES', { weekday: 'long' })}).`;
+                        msgFecha += `\n\n¿Confirmas? Responde *SI* para confirmar o *NO* para cancelar.`;
+                        await safeSendMessage(from, { text: msgFecha });
+                        return;
+                    }
+                    if (sesion && sesion.modo === 'visitando') {
+                        const dataVisitaDetect = {
+                            esperando_fecha: true,
+                            esperando_confirmacion: false,
+                            motivo: rawText,
+                            nombres: vendedor ? vendedor.nombre : pushName
+                        };
+                        agendaVisitas.set(from, dataVisitaDetect);
+                        await setSesionDatos(from, { tipo: 'visitando', esperando_fecha: true, esperando_confirmacion: false, motivo: rawText, nombres: dataVisitaDetect.nombres });
+                        await setModo(from, 'visitando');
+                        await safeSendMessage(from, { text: `Entiendo que deseas agendar una visita. 🚗\n\n¿Para qué día te gustaría que pasemos? Puedes decirme: *hoy*, *mañana*, *el jueves*, *en 15 días*, o la fecha que prefieras.` });
+                        return;
+                    }
+                    const dataVisitaDetect = {
+                        esperando_fecha: true,
+                        esperando_confirmacion: false,
+                        motivo: rawText,
+                        nombres: vendedor ? vendedor.nombre : pushName
+                    };
+                    agendaVisitas.set(from, dataVisitaDetect);
+                    await setSesionDatos(from, { tipo: 'visitando', esperando_fecha: true, esperando_confirmacion: false, motivo: rawText, nombres: dataVisitaDetect.nombres });
+                    await setModo(from, 'visitando');
+                    await safeSendMessage(from, { text: `Entiendo que deseas agendar una visita. 🚗\n\n¿Para qué día te gustaría que pasemos? Puedes decirme: *hoy*, *mañana*, *el jueves*, *en 15 días*, o la fecha que prefieras.` });
+                    return;
+                }
+            }
+
             // --- 5. LÓGICA DE PRODUCTOS MEJORADA ---
-            if (text !== 'menu' && !['hola', 'buen dia', 'buenos dias'].includes(text)) {
+            const autoReplyFrasi = ['gracias por comunicarte', 'mensaje automático', 'auto-reply', 'automatic reply', 'soy un bot', 'soy el asistente', 'comunicarte con', 'en breve te atenderemo'];
+            const esAutoReply = autoReplyFrasi.some(f => rawText.toLowerCase().includes(f));
+            if (!esAutoReply && !text.startsWith('menu')) {
+                // Multi-item detection
+                if (!multiItemOrders.has(from)) {
+                    const multiItems = parseMultiItemMessage(rawText);
+                    if (multiItems) {
+                        console.log(`[MULTI] Pedido de ${multiItems.length} items de ${from}`);
+                        if (!vendedor) {
+                            await setSesionDatos(from, { tipo: 'multi', items: multiItems, pushName: pushName });
+                            await setModo(from, 'esperando_vendedor');
+                            await safeSendMessage(from, { text: `🔍 *Detecté un pedido de ${multiItems.length} producto(s)*, pero no tengo identificado al vendedor.\n\n❓ *¿Cuál es su nombre como vendedor?*\n\n_Escriba el nombre exacto o *cancelar* para cancelar._` });
+                            return;
+                        }
+                        const multiOrder = { items: multiItems, currentIndex: 0, resolvedItems: [], pct: null, vendedor: vendedor, pushName: pushName };
+                        multiItemOrders.set(from, multiOrder);
+                        await processNextMultiItem(from, multiOrder);
+                        return;
+                    }
+                }
                 try {
+                    const palabrasEnMensaje = rawText.split(/\s+/);
+                    const txtNormal = normalizar(rawText);
+                    const contieneKeyword = PRODUCT_KEYWORDS.some(kw => txtNormal.includes(kw));
+                    const tieneCodigo = palabrasEnMensaje.some(p => {
+                        const c = p.replace(/[^a-zA-Z0-9]/g, '');
+                        return c.length >= 4 && /[A-Za-z]/.test(c) && /[0-9]/.test(c);
+                    });
+
                     let prods = null;
                     
-                    const palabrasEnMensaje = rawText.split(/\s+/);
+                    // Buscar por código primero
                     for (const p of palabrasEnMensaje) {
-                        const codCandidato = p.replace(/[^a-zA-Z0-9]/g, ''); 
-                        if (codCandidato.length >= 4) { 
+                        const codCandidato = p.replace(/[^a-zA-Z0-9]/g, '');
+                        if (codCandidato.length >= 4 && /[A-Za-z]/.test(codCandidato) && /[0-9]/.test(codCandidato)) {
                             prods = await buscarProductoPorCodigo(codCandidato);
-                            if (prods) break; 
+                            if (prods) break;
                         }
                     }
-                    
-                    if (!prods) {
-                        prods = await buscarProductoPorTexto(rawText);
+
+                    // Si no hay código y hay keyword de producto, buscar por texto
+                    if (!prods && contieneKeyword) {
+                        // Extraer cantidad del inicio si existe: "20 Rolineras delanteras de corolla"
+                        let textoBusqueda = rawText;
+                        let cantidadPedido = 0;
+                        const qtyMatch = rawText.match(/^\s*(\d{1,4})\s+(.+)/);
+                        if (qtyMatch) {
+                            cantidadPedido = parseInt(qtyMatch[1]);
+                            textoBusqueda = qtyMatch[2];
+                        }
+                        prods = await buscarProductoPorTexto(textoBusqueda);
+                        
+                        // Si múltiples resultados, presentar opciones
+                        if (prods && prods.length > 1) {
+                            const pct = await obtenerPorcentaje();
+                            let msg = `🔍 *${prods.length} productos encontrados para:* "${textoBusqueda}"\n`;
+                            prods.slice(0, 8).forEach((p, i) => {
+                                const precio = parseFloat(p.precio_minimo || 0) / pct;
+                                msg += `\n*${i+1}.* ${p.producto} — *$${precio.toFixed(2)}*\n   ${p.descripcion.substring(0, 60)}${p.descripcion.length > 60 ? '...' : ''}`;
+                            });
+                            msg += `\n\n📌 Responde el *número* del producto que necesitas.`;
+                            pendingProductSelection.set(from, { productos: prods.slice(0, 8), pct });
+                            return await safeSendMessage(from, { text: msg });
+                        }
                     }
 
                     if (prods) {
                         const pct = await obtenerPorcentaje();
-                        const saludos = [
-                            "Saludos estimado, gracias por tu consulta. Aquí tienes la información solicitada: 👇",
-                            "¡Hola! He buscado en nuestro inventario y encontré esto: 👇",
-                            "Un placer saludarte. Según lo que me indicas, aquí tienes lo disponible: 👇"
-                        ];
-                        const saludoAzar = saludos[Math.floor(Math.random() * saludos.length)];
-                        await safeSendMessage(from, { text: saludoAzar });
+                        const saludoExacto = `¡Hola! He buscado en nuestro inventario y encontré esto:\n`;
+                        await safeSendMessage(from, { text: saludoExacto });
                         await sleep(1000);
 
-                        for (const p of prods) {
-                            if (!isBotReady()) break; 
+                        for (const p of prods.slice(0, 5)) {
+                            if (!isBotReady()) break;
                             const precio = parseFloat(p.precio_minimo || 0) / pct;
                             
                             let infoStock = "";
                             if (parseFloat(p.stock_total || 0) <= 0) {
                                 const fab = parseFloat(p.cantidad_fabricando || 0);
                                 if (fab > 0) {
-                                    infoStock = "\n🏭 *EN FÁBRICA (Próximo a llegar)*";
+                                    infoStock = "\n🚚 *Sin existencia, en tránsito desde fábrica*";
                                 } else {
-                                    infoStock = "\n❌ *Sin existencia, solo información*";
+                                    infoStock = "";
                                 }
                             } else {
                                 infoStock = "\n✅ *Disponible*";
@@ -1147,7 +2601,7 @@ async function startBot() {
                             } catch (imgErr) {
                                 await safeSendMessage(from, { text: caption });
                             }
-                            await sleep(1500);
+                            await sleep(10000);
                         }
                         return;
                     }
@@ -1185,50 +2639,37 @@ async function startBot() {
                 return await safeSendMessage(from, { text: msg });
             }
 
-            // --- 7. SALUDO Y MENÚ ---
-            const nombreUsuario = vendedor ? vendedor.nombre : pushName;
-            const esSaludo = text === 'menu' || text.startsWith('menu ') ||
-                             text === 'hola' || text.startsWith('hola ') || text.startsWith('hola,') ||
-                             text.startsWith('buen dia ') || text === 'buen dia' ||
-                             text.startsWith('buenos dias ') || text === 'buenos dias' ||
-                             text.startsWith('buenas tardes ') || text === 'buenas tardes' ||
-                             text.startsWith('buenas noches ') || text === 'buenas noches';
-            if (esSaludo) {
-                const saludoBase = text.startsWith('buenas tardes') ? 'tarde' :
-                                   text.startsWith('buenas noches') ? 'noche' :
-                                   text.startsWith('buen') ? 'dia' : 'dia';
-                const respuestas = {
-                    'dia': `¡Buenos días, *${nombreUsuario}*! Dios le bendiga. Es un gusto tenerle por aquí. 🙏\n\n¿En qué podemos servirle el día de hoy? Aquí le ayudamos con mucho gusto.\n\n${MENU_TEXT}`,
-                    'tarde': `¡Buenas tardes, *${nombreUsuario}*! Un placer saludarle. Que tenga una bendecida tarde. 😊\n\n¿Cómo podemos ayudarle? Quedamos atentos a su solicitud.\n\n${MENU_TEXT}`,
-                    'noche': `¡Buenas noches, *${nombreUsuario}*! Dios le bendiga. Que descanse. 🌙\n\n¿En qué podemos ayudarle? Quedamos a la orden.\n\n${MENU_TEXT}`
-                };
-                if (text.startsWith('menu')) {
-                    return await safeSendMessage(from, { text: `¡Hola *${nombreUsuario}*! Es un gusto saludarle. 🙌\n\n¿En qué podemos ayudarle hoy? Indíquenos qué servicio necesita o consulte nuestro menú:\n\n${MENU_TEXT}` });
-                }
-                return await safeSendMessage(from, { text: respuestas[saludoBase] });
-            }
-            
             // --- 8. AGRADECIMIENTO ---
             const gratitudeWords = ['gracias', 'agradecid', 'agardecid', 'agradecimient'];
             if (gratitudeWords.some(w => text.includes(w))) {
-                const nombreUsuario = vendedor ? vendedor.nombre : pushName;
-                const respuestas = [
-                    `¡Ha sido un placer atenderle, *${nombreUsuario}*! Que Dios le bendiga y quede muy pendiente cualquier cosita que necesite. Aquí estamos para servirle. 🙏`,
-                    `Un honor poder ayudarle, *${nombreUsuario}*. Que tenga un excelente día y cualquier cosita no dude en escribirnos. ¡Estamos a la orden! 🙌`,
-                    `Con mucho gusto, *${nombreUsuario}*, para eso estamos. Que Dios le bendiga grandemente y quede muy pendiente. ¡Aquí tiene su casa! 🏠`,
-                    `Gracias a usted, *${nombreUsuario}*, por su confianza. Es un privilegio poder atenderle. Que pase un bendecido día. 😊🙏`,
-                    `¡De nada, *${nombreUsuario}*! Con todo el gusto del mundo. Recuerde que estamos para servirle en lo que necesite. ¡Dios le bendiga! 🌟`
+                const nombre = nombreAlmacenado || nombreExtraido || (vendedor ? vendedor.nombre : null) || pushName || "Usuario";
+                const respGrat = [
+                    `¡Ha sido un placer atenderle, *${nombre}*! Que Dios le bendiga y quede muy pendiente cualquier cosita que necesite. Aquí estamos para servirle. 🙏`,
+                    `Un honor poder ayudarle, *${nombre}*. Que tenga un excelente día y cualquier cosita no dude en escribirnos. ¡Estamos a la orden! 🙌`,
+                    `Con mucho gusto, *${nombre}*, para eso estamos. Que Dios le bendiga grandemente y quede muy pendiente. ¡Aquí tiene su casa! 🏠`,
+                    `Gracias a usted, *${nombre}*, por su confianza. Es un privilegio poder atenderle. Que pase un bendecido día. 😊🙏`,
+                    `¡De nada, *${nombre}*! Con todo el gusto del mundo. Recuerde que estamos para servirle en lo que necesite. ¡Dios le bendiga! 🌟`
                 ];
-                const respuesta = respuestas[Math.floor(Math.random() * respuestas.length)];
-                return await safeSendMessage(from, { text: respuesta });
+                return await safeSendMessage(from, { text: respGrat[Math.floor(Math.random() * respGrat.length)] });
             }
 
-            // --- 9. FALLBACK ---
+            // --- 9. FALLBACK (respuesta para mensajes no reconocidos) ---
             const conversationalShorts = ['si', 'no', 'ok', 'vale', 'ya', 'entendido', 'bueno', 'dale', 'claro'];
             if (conversationalShorts.includes(text)) return; 
             if (rawText.length > 500) return;
 
-            return;
+            const ahora = Date.now();
+            const ultimoFallback = lastFallbackSent.get(from) || 0;
+            if (ahora - ultimoFallback < FALLBACK_COOLDOWN_MS) return;
+
+            const nombreFb = nombreAlmacenado || nombreExtraido || (vendedor ? vendedor.nombre : null) || pushName || "Usuario";
+            const fallbacks = [
+                `Disculpa, *${nombreFb}*, no logré entender tu consulta. 🙏\n\nRecuerde que cualquier información adicional la puede obtener escribiendo la palabra *Menu*.`,
+                `*${nombreFb}*, no tengo una respuesta para eso. Recuerde que cualquier información adicional la puede obtener escribiendo la palabra *Menu*. 👇`,
+                `Hola *${nombreFb}*, no pude procesar tu mensaje. 😊\n\nRecuerde que cualquier información adicional la puede obtener escribiendo la palabra *Menu*.`
+            ];
+            lastFallbackSent.set(from, ahora);
+            return await safeSendMessage(from, { text: fallbacks[Math.floor(Math.random() * fallbacks.length)] });
         } catch (e) { console.log("[MSG] Error en handler de mensajes:", e.message); }
     });
 }
@@ -1237,7 +2678,7 @@ async function startBot() {
 const server = http.createServer(async (req, res) => {
     const parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
     const query = Object.fromEntries(parsedUrl.searchParams.entries());
-    const header = `<nav class="navbar navbar-dark bg-dark mb-4 shadow"><div class="container"><a class="navbar-brand fw-bold" href="/">ONE4CARS ADMIN</a></div></nav>`;
+    const header = `<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"><nav class="navbar navbar-dark mb-4 shadow" style="background:linear-gradient(135deg,#0f0c29,#302b63);border-bottom:1px solid rgba(255,255,255,0.08)"><div class="container"><a class="navbar-brand fw-bold" href="/" style="letter-spacing:-0.3px"><i class="bi bi-speedometer2 me-2"></i>ONE4CARS</a></div></nav>`;
     const routename = parsedUrl.pathname;
 
     if (routename === '/cobranza') {
@@ -1286,17 +2727,30 @@ const server = http.createServer(async (req, res) => {
         let b = ''; req.on('data', c => b += c);
         req.on('end', async () => {
             const data = JSON.parse(b);
-            for (const id_cliente of data.facturas) {
+                for (const id_cliente of data.facturas) {
                 const [facturas] = await pool.execute(
-                    "SELECT f.nro_factura, f.total, f.abono_factura, f.fecha_reg, f.porcentaje, c.nombres, c.celular FROM tab_facturas f JOIN tab_clientes c ON f.id_cliente = c.id_cliente WHERE f.id_cliente = ? AND f.pagada = 'NO' AND f.anulado = 'no'", 
+                    `SELECT f.nro_factura, f.total, f.abono_factura, f.fecha_reg, f.porcentaje,
+                            DATEDIFF(CURDATE(), f.fecha_reg) as dias, c.nombres, c.celular,
+                            v.nombre as vendedor_nombre
+                     FROM tab_facturas f
+                     JOIN tab_clientes c ON f.id_cliente = c.id_cliente
+                     LEFT JOIN tab_vendedores v ON f.id_vendedor = v.id_vendedor
+                     WHERE f.id_cliente = ? AND f.pagada = 'NO' AND f.anulado = 'no'`,
                     [id_cliente]
                 );
                 for (const f of facturas) {
                     const jid = formatWhatsApp(f.celular);
-                    const saldoBs = (f.total - f.abono_factura) / (f.porcentaje || 1);
-                    const msg = `Hola *${f.nombres}* 🚗, factura #${f.nro_factura} pendiente.\nSaldo: Bs. *${saldoBs.toLocaleString('es-VE')}*.\nPor favor gestione su pago.`;
+                    let divisas = parseFloat(f.total) - parseFloat(f.abono_factura || 0);
+                    let bcv = divisas / (parseFloat(f.porcentaje) || 1);
+                    if (f.vendedor_nombre && f.vendedor_nombre.toUpperCase() === 'MANUEL FERRAZ') {
+                        divisas = divisas / 0.80;
+                        bcv = bcv / 0.80;
+                    }
+                    const dias = Math.floor((new Date() - new Date(f.fecha_reg)) / 86400000);
+                    const tpl = pickTemplate(MESSAGE_TEMPLATES.cobranza60);
+                    const msg = tpl(f.nombres, f.nro_factura, divisas.toFixed(2), dias, bcv.toFixed(2));
                     await safeSendMessage(jid, { text: msg });
-                    await randomDelay();
+                    await humanDelay(25, 55);
                 }
             }
             res.end("OK");
@@ -1309,12 +2763,14 @@ const server = http.createServer(async (req, res) => {
             res.end(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Sesión borrada</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><meta http-equiv="refresh" content="5;url=/"> </head><body class="bg-light"><div class="container mt-5 text-center"><div class="card shadow p-5 mx-auto" style="max-width:500px;border-radius:15px;"><h3>✅ Sesión borrada</h3><p class="mt-3">La carpeta <strong>auth_info</strong> se eliminó correctamente.</p><p>El bot mostrará un nuevo código QR en <strong>5 segundos</strong>.</p><a href="/" class="btn btn-primary mt-3">Ir al inicio</a></div></div></body></html>`);
         } catch (e) { res.end("Error al borrar sesión: " + e.message); }
     } else if (routename === '/notificador-estado') {
-        
+
+        const filtroVendedorNotif = query.vendedor || '';
+
         if (query.action === 'force_cobranza') {
             if (isBotReady()) {
                 checkVendedoresRecordatorio(true).catch(e => console.log(e));
             }
-            res.writeHead(302, { 'Location': '/notificador-estado' });
+            res.writeHead(302, { 'Location': '/notificador-estado' + (filtroVendedorNotif ? '?vendedor='+encodeURIComponent(filtroVendedorNotif) : '') });
             return res.end();
         }
 
@@ -1324,11 +2780,13 @@ const server = http.createServer(async (req, res) => {
                 estadisticasEjecutando = false; 
                 checkEstadisticasVendedores(true).catch(e => console.log(e));
             }
-            res.writeHead(302, { 'Location': '/notificador-estado' });
+            res.writeHead(302, { 'Location': '/notificador-estado' + (filtroVendedorNotif ? '?vendedor='+encodeURIComponent(filtroVendedorNotif) : '') });
             return res.end();
         }
 
         const total = await notificador.obtenerFacturasNoNotificadasCount();
+        const [vendedoresNotif] = await pool.execute("SELECT DISTINCT vendedor FROM tab_clientes WHERE vendedor != '' AND vendedor IS NOT NULL ORDER BY vendedor");
+        const vendOptsNotif = vendedoresNotif.map(v => `<option value="${v.vendedor}"${filtroVendedorNotif===v.vendedor?' selected':''}>${v.vendedor}</option>`).join('');
 
         res.end(`<!DOCTYPE html>
         <html>
@@ -1343,14 +2801,22 @@ const server = http.createServer(async (req, res) => {
                 <div class="card shadow-lg p-4 mx-auto" style="max-width: 600px; border-radius: 15px;">
                     <h3>📬 Notificador</h3>
                     <hr>
+                    <form class="row g-2 mb-2 align-items-end" method="GET" action="/notificador-estado">
+                        <div class="col-auto">
+                            <label class="small fw-bold">Vendedor</label>
+                            <select name="vendedor" class="form-select form-select-sm" onchange="this.form.submit()">
+                                <option value="">Todos</option>${vendOptsNotif}
+                            </select>
+                        </div>
+                    </form>
                     <p>Facturas pendientes por notificar a clientes: <strong>${total}</strong></p>
                     <p>Estado del Bot: ${isBotReady() ? '<span class="text-success">🟢 Online</span>' : '<span class="text-danger">🔴 Offline</span>'}</p>
                     <hr>
                     <h5>📊 Control Manual de Vendedores</h5>
                     <p class="text-muted small">Selecciona la notificación que deseas enviar en este momento (Saltará restricciones de fecha).</p>
                     <div class="d-grid gap-2 mt-3">
-                        <a href="/notificador-estado?action=force_cobranza" class="btn btn-warning text-dark">⚠️ Forzar Notificación de Cuentas por Cobrar</a>
-                        <a href="/notificador-estado?action=force_stats" class="btn btn-primary">📊 Forzar Envío de Estadísticas de Ventas</a>
+                        <a href="/notificador-estado?action=force_cobranza${filtroVendedorNotif ? '&vendedor='+encodeURIComponent(filtroVendedorNotif) : ''}" class="btn btn-warning text-dark">⚠️ Forzar Notificación de Cuentas por Cobrar</a>
+                        <a href="/notificador-estado?action=force_stats${filtroVendedorNotif ? '&vendedor='+encodeURIComponent(filtroVendedorNotif) : ''}" class="btn btn-primary">📊 Forzar Envío de Estadísticas de Ventas</a>
                         <a href="/" class="btn btn-outline-secondary mt-2">Volver al Menú Principal</a>
                     </div>
                 </div>
@@ -1361,17 +2827,997 @@ const server = http.createServer(async (req, res) => {
         const [msgs] = await pool.execute("SELECT h.id, h.telefono, h.rol, h.contenido, h.fecha FROM historial_chat h ORDER BY h.fecha DESC LIMIT 200");
         const rows = msgs.map(m => `<tr><td>${m.telefono}</td><td class="${m.rol === 'user' ? 'text-primary' : 'text-success'}">${m.rol}</td><td style="max-width:400px;word-break:break-word">${m.contenido}</td><td>${new Date(m.fecha).toLocaleString()}</td></tr>`).join('');
         res.end(`<!DOCTYPE html><html><head><meta charset="UTF-8"><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><title>Historial Chat</title></head><body class="bg-light">${header}<div class="container mt-3"><h3>💬 Historial de Conversaciones</h3><div class="table-responsive"><table class="table table-sm table-striped"><thead><tr><th>Teléfono</th><th>Rol</th><th>Mensaje</th><th>Fecha</th></tr></thead><tbody>${rows}</tbody></table></div><a href="/" class="btn btn-outline-secondary">Volver</a></div></body></html>`);
+    } else if (routename === '/set-send-config' && req.method === 'POST') {
+        let b = ''; req.on('data', c => b += c);
+        req.on('end', () => {
+            try {
+                const data = JSON.parse(b);
+                if (data.batchSize) sendConfig.batchSize = parseInt(data.batchSize) || SEND_DEFAULTS.batchSize;
+                if (data.pauseSend) sendConfig.pauseSend = parseInt(data.pauseSend) || SEND_DEFAULTS.pauseSend;
+                if (data.pauseBatch) sendConfig.pauseBatch = parseInt(data.pauseBatch) || SEND_DEFAULTS.pauseBatch;
+                res.end("OK");
+            } catch (e) { res.end("Error"); }
+        });
+    } else if (routename === '/recordatorio-visita') {
+        if (query.action === 'force' || query.success || query.error) {
+            res.writeHead(302, { Location: '/recordatorio-visita' });
+            res.end();
+            return;
+        }
+
+        const lunes = new Date();
+        lunes.setDate(lunes.getDate() - ((lunes.getDay() + 6) % 7));
+        const semanaInicio = lunes.toISOString().split('T')[0];
+        const filtroZonaRV = query.zona || '';
+        const filtroVendedorRV = query.vendedor || '';
+
+        const [zonasRV] = await pool.execute("SELECT DISTINCT zona FROM tab_clientes WHERE zona != '' AND zona IS NOT NULL ORDER BY zona");
+        const [vendedoresRV] = await pool.execute("SELECT DISTINCT v.nombre FROM tab_vendedores v JOIN tab_clientes c ON c.vendedor = v.nombre WHERE v.nombre != '' ORDER BY v.nombre");
+
+        let sqlRV = `
+            SELECT DISTINCT c.id_cliente, c.nombres, c.celular, c.direccion, c.zona,
+                   COALESCE(v.nombre, 'Sin asignar') as vendedor_nombre,
+                   v.celular_vendedor
+            FROM tab_clientes c
+            LEFT JOIN tab_vendedores v ON c.vendedor = v.nombre
+            WHERE c.activo = 'si'
+              AND EXISTS (
+                SELECT 1 FROM tab_facturas f
+                WHERE f.id_cliente = c.id_cliente
+                  AND f.anulado = 'no'
+                  AND DATEDIFF(CURDATE(), f.fecha_reg) >= 45
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM tab_facturas f
+                WHERE f.id_cliente = c.id_cliente
+                  AND f.anulado = 'no'
+                  AND f.pagada = 'NO'
+              )`;
+        const paramsRV = [];
+        if (filtroZonaRV) { sqlRV += " AND c.zona = ?"; paramsRV.push(filtroZonaRV); }
+        if (filtroVendedorRV) { sqlRV += " AND v.nombre = ?"; paramsRV.push(filtroVendedorRV); }
+        sqlRV += " ORDER BY c.nombres";
+        const [clientesElegibles] = await pool.execute(sqlRV, paramsRV);
+
+        const [yaEnviados] = await pool.execute(
+            "SELECT id_cliente FROM recordatorio_visita_log WHERE semana_inicio = ?",
+            [semanaInicio]
+        );
+        const setYaEnviados = new Set(yaEnviados.map(r => r.id_cliente));
+
+        const [log] = await pool.execute(
+            "SELECT rv.*, c.nombres FROM recordatorio_visita_log rv LEFT JOIN tab_clientes c ON rv.id_cliente = c.id_cliente ORDER BY rv.fecha_envio DESC LIMIT 100"
+        );
+
+        const filasElegibles = clientesElegibles.map(c => {
+            const yaEnviado = setYaEnviados.has(c.id_cliente);
+            const checked = yaEnviado ? 'checked disabled' : '';
+            const badge = yaEnviado ? '<span class="badge bg-success">Enviado</span>' : '<span class="badge bg-warning text-dark">Pendiente</span>';
+            return `<tr class="${yaEnviado ? 'table-success' : ''}">
+                <td><input type="checkbox" class="cliente-check" value="${c.id_cliente}" ${checked}></td>
+                <td>${c.id_cliente}</td>
+                <td>${c.nombres}</td>
+                <td>${c.celular || ''}</td>
+                <td>${c.vendedor_nombre}</td>
+                <td>${c.zona || ''}</td>
+                <td>${badge}</td>
+            </tr>`;
+        }).join('');
+
+        const filasLog = log.map(r => `<tr><td>${r.id}</td><td>${r.id_cliente}</td><td>${r.nombres || ''}</td><td>${r.semana_inicio}</td><td>${new Date(r.fecha_envio).toLocaleString()}</td></tr>`).join('');
+        const zonaOptsRV = zonasRV.map(z => `<option value="${z.zona}"${filtroZonaRV===z.zona?' selected':''}>${z.zona}</option>`).join('');
+        const vendOptsRV = vendedoresRV.map(v => `<option value="${v.nombre}"${filtroVendedorRV===v.nombre?' selected':''}>${v.nombre}</option>`).join('');
+
+        res.end(`<!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+            <title>Recordatorio Visitas</title>
+        </head>
+        <body class="bg-light">
+            ${header}
+            <div class="container mt-3">
+                ${query.error ? `<div class="alert alert-danger">❌ ${query.error}</div>` : ''}
+                ${query.success ? `<div class="alert alert-success">✅ ${query.success}</div>` : ''}
+                <h3>📬 Recordatorio Semanal de Visitas</h3>
+                <p class="text-muted">Semana: <strong>${semanaInicio}</strong></p>
+
+                <form class="row g-2 mb-2 p-2 bg-white rounded shadow-sm align-items-end" method="GET" action="/recordatorio-visita">
+                    <div class="col-auto">
+                        <label class="small fw-bold">Zona</label>
+                        <select name="zona" class="form-select form-select-sm" onchange="this.form.submit()">
+                            <option value="">Todas</option>${zonaOptsRV}
+                        </select>
+                    </div>
+                    <div class="col-auto">
+                        <label class="small fw-bold">Vendedor</label>
+                        <select name="vendedor" class="form-select form-select-sm" onchange="this.form.submit()">
+                            <option value="">Todos</option>${vendOptsRV}
+                        </select>
+                    </div>
+                </form>
+
+                <details class="mb-2">
+                <summary style="cursor:pointer;font-size:0.9rem">⚙️ Configurar envíos</summary>
+                <div class="card card-body p-2 mb-2">
+                <div class="row g-2 align-items-end">
+                    <div class="col-auto"><label class="small">Bloque</label><input type="number" id="cfgBatch" class="form-control form-control-sm" value="${sendConfig.batchSize}" style="width:80px"></div>
+                    <div class="col-auto"><label class="small">Pausa/msg (seg)</label><input type="number" id="cfgPauseSend" class="form-control form-control-sm" value="${sendConfig.pauseSend/1000}" style="width:90px"></div>
+                    <div class="col-auto"><label class="small">Pausa/lote (min)</label><input type="number" id="cfgPauseBatch" class="form-control form-control-sm" value="${sendConfig.pauseBatch/60000}" style="width:90px"></div>
+                    <div class="col-auto"><button onclick="guardarConfig()" class="btn btn-sm btn-outline-dark">Guardar</button></div>
+                </div></div></details>
+
+                <div class="d-flex gap-2 mb-3">
+                    <button id="selectAll" class="btn btn-outline-primary btn-sm">✅ Seleccionar Todos</button>
+                    <button id="deselectAll" class="btn btn-outline-secondary btn-sm">❌ Desseleccionar</button>
+                    <button id="sendSelected" class="btn btn-danger btn-sm">🚀 Enviar a Seleccionados</button>
+                    <a href="/recordatorio-visita?action=force" class="btn btn-warning btn-sm">📨 Forzar Todos</a>
+                </div>
+
+                <div class="card shadow-sm mb-4">
+                    <div class="card-header bg-primary text-white">Clientes Elegibles (facturas pagadas, activos, +45 días)</div>
+                    <div class="table-responsive">
+                        <table class="table table-sm table-striped mb-0">
+                            <thead><tr><th><input type="checkbox" id="checkAll"></th><th>ID</th><th>Cliente</th><th>Celular</th><th>Vendedor</th><th>Zona</th><th>Estado</th></tr></thead>
+                            <tbody>${filasElegibles}</tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="card shadow-sm">
+                    <div class="card-header bg-secondary text-white">Historial de Envíos</div>
+                    <div class="table-responsive">
+                        <table class="table table-sm table-striped mb-0">
+                            <thead><tr><th>ID</th><th>ID Cliente</th><th>Cliente</th><th>Semana</th><th>Enviado</th></tr></thead>
+                            <tbody>${filasLog}</tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <a href="/" class="btn btn-outline-secondary mt-3">Volver</a>
+            </div>
+
+            <script>
+            document.getElementById('checkAll').addEventListener('change', function() {
+                document.querySelectorAll('.cliente-check:not(:disabled)').forEach(cb => cb.checked = this.checked);
+            });
+            document.getElementById('selectAll').addEventListener('click', function() {
+                document.querySelectorAll('.cliente-check:not(:disabled)').forEach(cb => cb.checked = true);
+            });
+            document.getElementById('deselectAll').addEventListener('click', function() {
+                document.querySelectorAll('.cliente-check:not(:disabled)').forEach(cb => cb.checked = false);
+            });
+            document.getElementById('sendSelected').addEventListener('click', async function() {
+                const ids = Array.from(document.querySelectorAll('.cliente-check:checked:not(:disabled)')).map(cb => cb.value);
+                if (ids.length === 0) { alert('Selecciona al menos un cliente.'); return; }
+                if (!confirm('Enviar recordatorio a ' + ids.length + ' cliente(s)?')) return;
+                this.disabled = true; this.textContent = 'Enviando...';
+                try {
+                    const res = await fetch('/enviar-recordatorio-visita', {
+                        method: 'POST', headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ clientes: ids })
+                    });
+                    const text = await res.text();
+                    alert(text);
+                    location.reload();
+                } catch(e) { alert('Error: ' + e.message); }
+                this.disabled = false; this.textContent = 'Enviar a Seleccionados';
+            });
+            async function guardarConfig(){
+                const d={batchSize:document.getElementById('cfgBatch').value,pauseSend:document.getElementById('cfgPauseSend').value*1000,pauseBatch:document.getElementById('cfgPauseBatch').value*60000};
+                try{await fetch('/set-send-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});alert('Config guardada.');}catch(e){alert('Error: '+e.message);}
+            }
+            </script>
+        </body>
+        </html>`);
+    } else if (routename === '/visitas') {
+        const filtroZona = parsedUrl.searchParams.get('zona') || '';
+        const filtroFechaDesde = parsedUrl.searchParams.get('fecha_desde') || '';
+        const filtroFechaHasta = parsedUrl.searchParams.get('fecha_hasta') || '';
+        const filtroDia = parsedUrl.searchParams.get('dia') || '';
+        let where = ["a.estado IN ('pendiente','no_contesto','ausente','pospuso') OR a.estado IS NULL"];
+        let params = [];
+        if (filtroZona) { where.push("c.zona = ?"); params.push(filtroZona); }
+        if (filtroDia) { where.push("a.fecha = ?"); params.push(filtroDia); }
+        if (filtroFechaDesde) { where.push("a.fecha >= ?"); params.push(filtroFechaDesde); }
+        if (filtroFechaHasta) { where.push("a.fecha <= ?"); params.push(filtroFechaHasta); }
+        const whereClause = "WHERE (" + where.join(") AND (") + ")";
+        const [zonas] = await pool.execute("SELECT DISTINCT c.zona FROM tab_agenda_visitas a JOIN tab_clientes c ON a.id_cliente = c.id_cliente WHERE c.zona != '' ORDER BY c.zona");
+        const [visitas] = await pool.execute("SELECT a.id_agenda, a.id_cliente, a.fecha, a.hora, a.estado, a.frecuencia_dias, a.observacion, c.nombres, c.celular, c.zona, c.vendedor FROM tab_agenda_visitas a JOIN tab_clientes c ON a.id_cliente = c.id_cliente " + whereClause + " ORDER BY a.fecha ASC, a.hora ASC LIMIT 200", params);
+        const estadoBadge = { pendiente:'bg-warning text-dark', cumplida:'bg-success', pago:'bg-success', cerrado:'bg-secondary', no_contesto:'bg-warning text-dark', ausente:'bg-warning text-dark', pospuso:'bg-warning text-dark' };
+        const estadoLabel = { pendiente:'Pendiente', cumplida:'Cumplida', pago:'Pagó', cerrado:'Cerrado', no_contesto:'No Contestó', ausente:'Ausente', pospuso:'Pospuso' };
+        const fmtTel = (t) => { const c = t.replace(/\D/g,''); return c.startsWith('58') ? c : '58'+c; };
+        const rows = visitas.map(v => {
+            const eb = estadoBadge[v.estado] || 'bg-warning text-dark';
+            const el = estadoLabel[v.estado] || 'Pendiente';
+            const wa = fmtTel(v.celular);
+            return `<tr>
+            <td><input type="checkbox" class="visita-check" value="${v.id_agenda}"></td>
+            <td>${v.id_agenda}</td>
+            <td>${v.fecha || ''}</td>
+            <td><a href="?vista=cliente&id_cliente=${v.id_cliente}" target="_blank">${v.nombres || ''}</a> <a href="#" onclick="return verHistorial(${v.id_cliente})" title="Historial"><i class="bi bi-clock-history text-secondary ms-1" style="font-size:0.7rem"></i></a></td>
+            <td>${v.celular || ''}</td>
+            <td>${v.vendedor || ''}</td>
+            <td>${v.zona || ''}</td>
+            <td><span id="fecha-${v.id_agenda}">${v.fecha || ''}</span>
+                <input type="date" id="nueva-fecha-${v.id_agenda}" style="display:none" class="form-control form-control-sm d-inline" style="width:auto">
+                <button id="btn-repro-${v.id_agenda}" style="display:none" class="btn btn-sm btn-success" onclick="guardarRepro(${v.id_agenda})">✔</button>
+            </td>
+            <td>${v.observacion ? v.observacion.substring(0, 40) : ''}</td>
+            <td><span class="badge ${eb}">${el}</span></td>
+            <td class="no-print">
+                <div class="dropdown">
+                    <button class="btn btn-sm btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" style="font-size:0.7rem;padding:2px 6px;">
+                        <i class="bi bi-gear"></i>
+                    </button>
+                    <ul class="dropdown-menu dropdown-menu-end" style="font-size:0.75rem;min-width:170px;">
+                        <li><a class="dropdown-item" href="https://wa.me/${wa}" target="_blank"><i class="bi bi-whatsapp text-success me-2"></i>WhatsApp</a></li>
+                        <li><hr class="dropdown-divider"></li>
+                        <li class="dropdown-header">Resultado de Visita</li>
+                        <li><a class="dropdown-item" href="#" onclick="return accionVisita(${v.id_agenda},'pago')"><i class="bi bi-cash text-success me-2"></i>Pagó</a></li>
+                        <li><a class="dropdown-item" href="#" onclick="return accionVisita(${v.id_agenda},'no_contesto')"><i class="bi bi-telephone-x text-warning me-2"></i>No Contestó</a></li>
+                        <li><a class="dropdown-item" href="#" onclick="return accionVisita(${v.id_agenda},'ausente')"><i class="bi bi-person-x text-warning me-2"></i>Ausente</a></li>
+                        <li><a class="dropdown-item" href="#" onclick="return accionVisita(${v.id_agenda},'pospuso')"><i class="bi bi-calendar-x text-warning me-2"></i>Pospuso</a></li>
+                        <li><a class="dropdown-item" href="#" onclick="return accionVisita(${v.id_agenda},'cerrado')"><i class="bi bi-lock text-danger me-2"></i>Cerrado</a></li>
+                        <li><hr class="dropdown-divider"></li>
+                        <li><a class="dropdown-item" href="#" onclick="return posponerVisita(${v.id_agenda})"><i class="bi bi-skip-forward text-warning me-2"></i>Posponer</a></li>
+                        <li><a class="dropdown-item" href="#" onclick="return reprogramar(${v.id_agenda})"><i class="bi bi-calendar-event text-info me-2"></i>Cambiar Fecha</a></li>
+                        <li><hr class="dropdown-divider"></li>
+                        <li class="dropdown-header">Frecuencia</li>
+                        <li><a class="dropdown-item" href="#" onclick="return asignaFrec(${v.id_agenda},1)">Diario</a></li>
+                        <li><a class="dropdown-item" href="#" onclick="return asignaFrec(${v.id_agenda},7)">Semanal</a></li>
+                        <li><a class="dropdown-item" href="#" onclick="return asignaFrec(${v.id_agenda},15)">Quincenal</a></li>
+                        <li><a class="dropdown-item" href="#" onclick="return asignaFrec(${v.id_agenda},30)">Mensual</a></li>
+                        <li><a class="dropdown-item" href="#" onclick="return asignaFrec(${v.id_agenda},60)">Bimestral</a></li>
+                        <li><a class="dropdown-item" href="#" onclick="return asignaFrec(${v.id_agenda},90)">Trimestral</a></li>
+                        <li><hr class="dropdown-divider"></li>
+                        <li><a class="dropdown-item text-danger" href="#" onclick="return eliminarVisita(${v.id_agenda})"><i class="bi bi-trash me-2"></i>Eliminar</a></li>
+                    </ul>
+                </div>
+            </td>
+        </tr>`}).join('');
+        const zonaOptions = zonas.map(z => `<option value="${z.zona}"${filtroZona === z.zona ? ' selected' : ''}>${z.zona}</option>`).join('');
+
+        // Calendar
+        const hoyCal = new Date();
+        const anioCal = hoyCal.getFullYear();
+        const mesCal = hoyCal.getMonth();
+        const primerDia = new Date(anioCal, mesCal, 1);
+        const ultimoDia = new Date(anioCal, mesCal + 1, 0);
+        const inicioMes = primerDia.toISOString().split('T')[0];
+        const finMes = ultimoDia.toISOString().split('T')[0];
+        const [visitasPorDia] = await pool.execute("SELECT a.fecha, COUNT(*) as total FROM tab_agenda_visitas a WHERE a.fecha BETWEEN ? AND ? GROUP BY a.fecha", [inicioMes, finMes]);
+        const calMap = {};
+        visitasPorDia.forEach(v => { calMap[v.fecha] = v.total; });
+        const diasSemana = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
+        let calRows = '';
+        let diaCelda = 1;
+        const primerDow = primerDia.getDay();
+        const totalDias = ultimoDia.getDate();
+        for (let s = 0; s < 6; s++) {
+            if (diaCelda > totalDias) break;
+            calRows += '<tr>';
+            for (let d = 0; d < 7; d++) {
+                if ((s === 0 && d < primerDow) || diaCelda > totalDias) {
+                    calRows += '<td style="padding:6px"></td>';
+                } else {
+                    const fechaStr = `${anioCal}-${String(mesCal+1).padStart(2,'0')}-${String(diaCelda).padStart(2,'0')}`;
+                    const count = calMap[fechaStr] || 0;
+                    const hoyStr = hoyCal.toISOString().split('T')[0];
+                    const cls = fechaStr === hoyStr ? 'bg-warning text-dark' : (count > 0 ? 'bg-success text-white' : '');
+                    calRows += `<td class="${cls}" style="padding:6px;cursor:pointer;border-radius:6px;text-align:center" onclick="window.location='/visitas?dia=${fechaStr}'">
+                        <strong>${diaCelda}</strong><br><small>${count > 0 ? count+' vis' : ''}</small>
+                    </td>`;
+                    diaCelda++;
+                }
+            }
+            calRows += '</tr>';
+        }
+        const meses = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
+
+        res.end(`<!DOCTYPE html><html><head><meta charset="UTF-8"><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"><title>Visitas Agendadas</title><style>body{background:#f4f7f6}.card-custom{border-radius:12px;border:none;box-shadow:0 2px 8px rgba(0,0,0,0.06)}@media print{body{background:#fff}.no-print,.no-print-table{display:none!important}.card-custom{box-shadow:none;border:1px solid #ddd}table{font-size:11px}td:first-child,th:first-child{display:none}}</style></head><body class="bg-light">${header}
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+        <div class="container-fluid px-4 mt-3">
+        <h3>📅 Agenda de Visitas</h3>
+
+        <div class="row g-3 mb-3 no-print">
+        <!-- Filters -->
+        <div class="col-md-8">
+        <div class="card card-custom p-3">
+        <form class="row g-2 align-items-end" method="GET" action="/visitas">
+            <div class="col-3">
+                <label class="small fw-bold">Zona</label>
+                <select name="zona" class="form-select form-select-sm">${zonaOptions}</select>
+            </div>
+            <div class="col-3">
+                <label class="small fw-bold">Ver día</label>
+                <input type="date" name="dia" class="form-control form-control-sm" value="${filtroDia}">
+            </div>
+            <div class="col-2">
+                <label class="small fw-bold">Desde</label>
+                <input type="date" name="fecha_desde" class="form-control form-control-sm" value="${filtroFechaDesde}">
+            </div>
+            <div class="col-2">
+                <label class="small fw-bold">Hasta</label>
+                <input type="date" name="fecha_hasta" class="form-control form-control-sm" value="${filtroFechaHasta}">
+            </div>
+            <div class="col-2 d-flex gap-1">
+                <button type="submit" class="btn btn-sm btn-primary">Filtrar</button>
+                <a href="/visitas" class="btn btn-sm btn-outline-secondary">X</a>
+                <button onclick="window.print()" class="btn btn-sm btn-info text-white">🖨️</button>
+            </div>
+        </form>
+        </div>
+        </div>
+
+        <!-- Move visits -->
+        <div class="col-md-4 no-print">
+        <div class="card card-custom p-3">
+        <div class="row g-2 align-items-end">
+            <div class="col-5">
+                <label class="small fw-bold">De fecha</label>
+                <input type="date" id="mvDesde" class="form-control form-control-sm">
+            </div>
+            <div class="col-5">
+                <label class="small fw-bold">A fecha</label>
+                <input type="date" id="mvHasta" class="form-control form-control-sm">
+            </div>
+            <div class="col-2">
+                <button onclick="moverVisitas()" class="btn btn-sm btn-warning">Mover ➡</button>
+            </div>
+        </div>
+        </div>
+        </div>
+        </div>
+
+        <!-- Calendar -->
+        <div class="card card-custom p-3 mb-3 no-print">
+        <h5>🗓️ ${meses[mesCal]} ${anioCal}</h5>
+        <table class="table table-sm table-borderless mb-0 text-center">
+        <thead><tr>${diasSemana.map(d => `<th class="small text-muted">${d}</th>`).join('')}</tr></thead>
+        <tbody>${calRows}</tbody>
+        </table></div>
+
+        <div class="card card-custom p-3">
+        <div class="d-flex justify-content-between align-items-center mb-2 no-print">
+            <h5>Visitas (${visitas.length})</h5>
+            <div><input class="form-check-input" type="checkbox" id="checkAllVis" onchange="document.querySelectorAll('.visita-check').forEach(c=>c.checked=this.checked)"> <label class="form-check-label small">Sel. Todos</label></div>
+        </div>
+        <!-- Metrics -->
+        ${(()=>{
+            const totalVis = visitas.length;
+            const cumplidas = visitas.filter(v => v.estado === 'cumplida' || v.estado === 'pago').length;
+            const pct = totalVis > 0 ? Math.round(cumplidas/totalVis*100) : 0;
+            const vendedores = {};
+            visitas.forEach(v => { const nom = v.vendedor || 'N/A'; vendedores[nom] = (vendedores[nom]||0)+1; });
+            const vendedorTop = Object.entries(vendedores).sort((a,b)=>b[1]-a[1]).slice(0,3);
+            return `<div class="row g-2 mb-3 no-print">
+                <div class="col-6 col-md-3"><div class="border rounded p-2 text-center bg-light"><small class="text-muted">Total</small><div class="fw-bold fs-5">${totalVis}</div></div></div>
+                <div class="col-6 col-md-3"><div class="border rounded p-2 text-center bg-light"><small class="text-muted">Cumplidas</small><div class="fw-bold fs-5 text-success">${cumplidas} <small class="fs-6">(${pct}%)</small></div></div></div>
+                <div class="col-6 col-md-3"><div class="border rounded p-2 text-center bg-light"><small class="text-muted">Pendientes</small><div class="fw-bold fs-5 text-warning">${totalVis - cumplidas}</div></div></div>
+                <div class="col-6 col-md-3"><div class="border rounded p-2 text-center bg-light"><small class="text-muted">Top</small><div class="fw-bold fs-6">${vendedorTop.map(([n,c]) => n.split(' ')[0]+'('+c+')').join(', ')}</div></div></div>
+            </div>`;
+        })()}
+        <div class="table-responsive">
+        <table class="table table-hover table-sm align-middle">
+        <thead class="table-light"><tr><th style="width:36px">Sel</th><th>ID</th><th>Fecha</th><th>Cliente</th><th>Celular</th><th>Vendedor</th><th>Zona</th><th>Acuerdo</th><th>Observación</th><th>Estado</th><th style="width:60px" class="no-print">Acción</th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="11" class="text-center text-muted">Sin visitas</td></tr>'}</tbody>
+        </table></div></div>
+        <a href="/" class="btn btn-outline-secondary mt-2 no-print">⬅ Volver</a>
+        </div>
+        <script>
+        function reprogramar(id, nombre){
+            document.getElementById('fecha-'+id).style.display='none';
+            document.getElementById('nueva-fecha-'+id).style.display='inline';
+            document.getElementById('btn-repro-'+id).style.display='inline';
+            return false;
+        }
+        async function guardarRepro(id){
+            const nuevaFecha=document.getElementById('nueva-fecha-'+id).value;
+            if(!nuevaFecha)return alert("Selecciona una fecha.");
+            try{
+                const r=await fetch('/reprogramar-visita',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id_visita:id,nueva_fecha:nuevaFecha})});
+                const t=await r.text();alert(t);location.reload();
+            }catch(e){alert('Error: '+e.message);}
+        }
+        async function moverVisitas(){
+            const desde=document.getElementById('mvDesde').value;
+            const hasta=document.getElementById('mvHasta').value;
+            if(!desde||!hasta)return alert("Selecciona ambas fechas.");
+            if(!confirm("Mover TODAS las visitas de "+desde+" a "+hasta+"?"))return;
+            try{
+                const r=await fetch('/mover-visitas',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({desde,hasta})});
+                const t=await r.text();alert(t);location.reload();
+            }catch(e){alert('Error: '+e.message);}
+        }
+        async function accionVisita(id, estado){
+            if(!confirm("¿Marcar visita #"+id+" como "+estado+"?"))return false;
+            try{
+                const r=await fetch('/accion-visita',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id_agenda:id,estado})});
+                const t=await r.text();alert(t);if(t.includes('✅'))location.reload();
+            }catch(e){alert('Error: '+e.message);}
+            return false;
+        }
+        async function posponerVisita(id){
+            if(!confirm("¿Posponer visita #"+id+" al próximo día hábil?"))return false;
+            try{
+                const r=await fetch('/accion-visita',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id_agenda:id,estado:'posponer'})});
+                const t=await r.text();alert(t);if(t.includes('✅'))location.reload();
+            }catch(e){alert('Error: '+e.message);}
+            return false;
+        }
+        async function asignaFrec(id, dias){
+            if(!confirm("¿Asignar frecuencia de "+dias+" días a visita #"+id+"?"))return false;
+            try{
+                const r=await fetch('/accion-visita',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id_agenda:id,estado:'frecuencia',frecuencia_dias:dias})});
+                const t=await r.text();alert(t);if(t.includes('✅'))location.reload();
+            }catch(e){alert('Error: '+e.message);}
+            return false;
+        }
+        async function eliminarVisita(id){
+            if(!confirm("¿Eliminar visita #"+id+"?"))return false;
+            try{
+                const r=await fetch('/accion-visita',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id_agenda:id,estado:'eliminar'})});
+                const t=await r.text();alert(t);if(t.includes('✅'))location.reload();
+            }catch(e){alert('Error: '+e.message);}
+            return false;
+        }
+        async function verHistorial(idCliente){
+            const r=await fetch('/historial-cliente?id_cliente='+idCliente);
+            const data=await r.json();
+            if(!data.length){alert('Sin historial.');return false;}
+            let h='<table class="table table-sm table-striped mb-0"><thead><tr><th>Fecha</th><th>Estado</th><th>Observación</th></tr></thead><tbody>';
+            data.forEach(v=>{h+='<tr><td>'+v.fecha+'</td><td><span class="badge bg-secondary">'+(v.estado||'pendiente')+'</span></td><td>'+(v.observacion||'')+'</td></tr>';});
+            h+='</tbody></table>';
+            const d=document.getElementById('historialModal');
+            d.querySelector('.modal-body').innerHTML=h;
+            new bootstrap.Modal(d).show();
+            return false;
+        }
+        </script>
+        <!-- Historial Modal -->
+        <div class="modal fade" id="historialModal" tabindex="-1"><div class="modal-dialog modal-lg"><div class="modal-content"><div class="modal-header"><h5 class="modal-title">Historial de Visitas</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"></div></div></div></div>
+        </body></html>`);
+    } else if (routename === '/accion-visita' && req.method === 'POST') {
+        let b = ''; req.on('data', c => b += c);
+        req.on('end', async () => {
+            try {
+                const data = JSON.parse(b);
+                const { id_agenda, estado } = data;
+                if (estado === 'eliminar') {
+                    await dualExecute("DELETE FROM tab_agenda_visitas WHERE id_agenda = ?", [id_agenda]);
+                    res.end(`✅ Visita #${id_agenda} eliminada.`);
+                } else if (estado === 'posponer') {
+                    const [rows] = await pool.execute("SELECT fecha FROM tab_agenda_visitas WHERE id_agenda = ?", [id_agenda]);
+                    if (rows.length === 0) { res.end("❌ Visita no encontrada."); return; }
+                    let nueva = new Date(rows[0].fecha);
+                    nueva.setDate(nueva.getDate() + 1);
+                    while (nueva.getDay() === 0 || nueva.getDay() === 6) nueva.setDate(nueva.getDate() + 1);
+                    const nuevaStr = nueva.toISOString().split('T')[0];
+                    await dualExecute("UPDATE tab_agenda_visitas SET fecha = ? WHERE id_agenda = ?", [nuevaStr, id_agenda]);
+                    res.end(`✅ Visita #${id_agenda} pospuesta al ${nuevaStr}.`);
+                } else if (estado === 'frecuencia') {
+                    const fd = parseInt(data.frecuencia_dias) || 0;
+                    await dualExecute("UPDATE tab_agenda_visitas SET frecuencia_dias = ?, fecha_origen = COALESCE(fecha_origen, CURDATE()) WHERE id_agenda = ?", [fd, id_agenda]);
+                    res.end(`✅ Frecuencia de ${fd} días asignada a visita #${id_agenda}.`);
+                } else if (['pago','cumplida','no_contesto','ausente','pospuso','cerrado'].includes(estado)) {
+                    await dualExecute("UPDATE tab_agenda_visitas SET estado = ? WHERE id_agenda = ?", [estado, id_agenda]);
+                    res.end(`✅ Visita #${id_agenda} marcada como ${estado}.`);
+                } else {
+                    res.end("❌ Acción no válida.");
+                }
+            } catch (e) { res.end("Error: " + e.message); }
+        });
+    } else if (routename === '/reprogramar-visita' && req.method === 'POST') {
+        let b = ''; req.on('data', c => b += c);
+        req.on('end', async () => {
+            try {
+                const data = JSON.parse(b);
+                await dualExecute("UPDATE tab_agenda_visitas SET fecha = ? WHERE id_agenda = ?", [data.nueva_fecha, data.id_visita]);
+                res.end(`✅ Visita #${data.id_visita} reprogramada para ${data.nueva_fecha}.`);
+            } catch (e) { res.end("Error: " + e.message); }
+        });
+    } else if (routename === '/enviar-recordatorio-estado' && req.method === 'POST') {
+        if (!isBotReady()) { res.end("Bot no listo."); return; }
+        let b = ''; req.on('data', c => b += c);
+        req.on('end', async () => {
+            try {
+                const data = JSON.parse(b);
+                const ids = data.clientes || [];
+                if (ids.length === 0) { res.end("Ningún cliente seleccionado."); return; }
+                res.end(`✅ Envío iniciado para ${ids.length} cliente(s).`);
+                setTimeout(async () => {
+                    let cont = 0;
+                    const bs = sendConfig.batchSize;
+                    const pb = sendConfig.pauseBatch;
+                    for (let i = 0; i < ids.length; i++) {
+                        if (i > 0 && i % bs === 0) { console.log(`[REC ESTADO] Pausa ${pb/60000}min lote ${i}/${ids.length}...`); await sleep(pb); }
+                        const [clientes] = await pool.execute("SELECT id_cliente, nombres, celular FROM tab_clientes WHERE id_cliente = ?", [ids[i]]);
+                        const c = clientes[0];
+                        if (!c) continue;
+                        const [facturas] = await pool.execute("SELECT nro_factura, total, abono_factura, porcentaje, DATEDIFF(CURDATE(), fecha_reg) as dias FROM tab_facturas WHERE id_cliente = ? AND pagada='NO' AND anulado='no' ORDER BY fecha_reg ASC LIMIT 1", [c.id_cliente]);
+                        const f = facturas[0];
+                        const notaStr = f ? `#${f.nro_factura}` : 'pendiente';
+                        const diasStr = f ? `${f.dias} días` : 'varios días';
+                        const divisas = f ? (parseFloat(f.total) - parseFloat(f.abono_factura || 0)) : 0;
+                        const bcv = (divisas && f) ? (divisas / (parseFloat(f.porcentaje) || 1)) : 0;
+                        const jid = formatWhatsApp(c.celular);
+                        if (!jid) continue;
+                        const tpl = pickTemplate(MESSAGE_TEMPLATES.recordatorioEstado);
+                        const msg = tpl(c.nombres, notaStr, divisas.toFixed(2), diasStr, bcv.toFixed(2));
+                        await safeSendMessage(jid, { text: msg });
+                        cont++;
+                        await humanDelay(25, 50);
+                    }
+                    console.log(`[RECORDATORIO ESTADO] ${cont}/${ids.length} enviado(s).`);
+                }, 500);
+            } catch (e) { res.end("Error: " + e.message); }
+        });
     } else if (routename === '/recordatorio-estado') {
-        const facturas = await notificador.obtenerFacturasVencidas();
-        const enviados = await notificador.obtenerRecordatoriosEnviados();
-        res.end(`<!DOCTYPE html><html><head><meta charset="UTF-8"><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><title>Recordatorios</title></head><body class="bg-light">${header}<div class="container mt-5"><div class="card shadow-lg p-4 mx-auto" style="max-width: 800px; border-radius: 15px;"><h3>📅 Recordatorios</h3><hr><table class="table table-sm"><thead><tr><th>Factura</th><th>Cliente</th><th>Días</th><th>Estado</th></tr></thead><tbody>${facturas.map(f => `<tr><td>${f.nro_factura}</td><td>${f.nombres}</td><td>${f.dias_vencida}</td><td>${(enviados[f.id_factura]) ? '✅' : '⏳'}</td></tr>`).join('')}</tbody></table><a href="/" class="btn btn-outline-secondary">Volver</a></div></div></body></html>`);
+        if (query.force) {
+            if (!isBotReady()) { res.writeHead(302, { Location: '/recordatorio-estado?error=Bot+no+listo' }); res.end(); return; }
+            res.writeHead(302, { Location: '/recordatorio-estado?success=Forzado+iniciado' });
+            res.end();
+            setTimeout(async () => {
+                const [todos] = await pool.execute("SELECT DISTINCT c.id_cliente, c.nombres, c.celular FROM tab_clientes c JOIN tab_facturas f ON c.id_cliente = f.id_cliente WHERE f.pagada='NO' AND f.anulado='no' AND c.activo='si'");
+                let cont = 0;
+                const bs = sendConfig.batchSize;
+                const pb = sendConfig.pauseBatch;
+                for (let i = 0; i < todos.length; i++) {
+                    if (i > 0 && i % bs === 0) { console.log(`[REC ESTADO] Pausa ${pb/60000}min lote ${i}/${todos.length}...`); await sleep(pb); }
+                    const c = todos[i];
+                    const [facturas] = await pool.execute("SELECT nro_factura, total, abono_factura, porcentaje, DATEDIFF(CURDATE(), fecha_reg) as dias FROM tab_facturas WHERE id_cliente = ? AND pagada='NO' AND anulado='no' ORDER BY fecha_reg ASC LIMIT 1", [c.id_cliente]);
+                    const f = facturas[0];
+                    const notaStr = f ? `#${f.nro_factura}` : 'pendiente';
+                    const diasStr = f ? `${f.dias} días` : 'varios días';
+                    const divisas = f ? (parseFloat(f.total) - parseFloat(f.abono_factura || 0)) : 0;
+                    const bcv = (divisas && f) ? (divisas / (parseFloat(f.porcentaje) || 1)) : 0;
+                    const jid = formatWhatsApp(c.celular);
+                    if (!jid) continue;
+                    const tpl = pickTemplate(MESSAGE_TEMPLATES.recordatorioEstado);
+                    const msg = tpl(c.nombres, notaStr, divisas.toFixed(2), diasStr, bcv.toFixed(2));
+                    await safeSendMessage(jid, { text: msg });
+                    cont++;
+                    await humanDelay(25, 50);
+                }
+                console.log(`[RECORDATORIO ESTADO] Forzado: ${cont} enviado(s).`);
+            }, 500);
+            return;
+        }
+        const [zonas] = await pool.execute("SELECT DISTINCT zona FROM tab_clientes WHERE zona != '' AND zona IS NOT NULL ORDER BY zona");
+        const [vendedores] = await pool.execute("SELECT DISTINCT vendedor FROM tab_clientes WHERE vendedor != '' AND vendedor IS NOT NULL ORDER BY vendedor");
+        const filtroZona = query.zona || '';
+        const filtroVendedor = query.vendedor || '';
+        let sql = `SELECT c.id_cliente, c.nombres, c.celular, c.zona, c.vendedor,
+                   SUM((f.total - f.abono_factura) / (f.porcentaje || 1)) as saldo_total,
+                   COUNT(f.id_factura) as cantidad_facturas,
+                   MAX(DATEDIFF(CURDATE(), f.fecha_reg)) as dias_vencida
+                   FROM tab_clientes c JOIN tab_facturas f ON c.id_cliente = f.id_cliente
+                   WHERE f.pagada = 'NO' AND f.anulado = 'no' AND c.activo = 'si'`;
+        const params = [];
+        if (filtroZona) { sql += " AND c.zona = ?"; params.push(filtroZona); }
+        if (filtroVendedor) { sql += " AND c.vendedor = ?"; params.push(filtroVendedor); }
+        sql += " GROUP BY c.id_cliente HAVING saldo_total > 0 ORDER BY dias_vencida DESC";
+        const [deudores] = await pool.execute(sql, params);
+        const [yaNotificados] = await pool.execute("SELECT id_cliente, COUNT(*) as total FROM recordatorios_log rl JOIN tab_facturas f ON rl.id_factura = f.id_factura GROUP BY f.id_cliente");
+        const notifSet = new Set(yaNotificados.map(r => r.id_cliente));
+        const zonaOpts = zonas.map(z => `<option value="${z.zona}"${filtroZona === z.zona?' selected':''}>${z.zona}</option>`).join('');
+        const vendOpts = vendedores.map(v => `<option value="${v.vendedor}"${filtroVendedor === v.vendedor?' selected':''}>${v.vendedor}</option>`).join('');
+        const filas = deudores.map(d => `<tr>
+            <td><input type="checkbox" class="cliente-check-rec" value="${d.id_cliente}" checked></td>
+            <td>${d.nombres}</td><td>${d.celular || ''}</td>
+            <td><span class="badge bg-secondary">${d.zona || ''}</span></td>
+            <td>${d.vendedor || ''}</td>
+            <td class="text-center">${d.cantidad_facturas}</td>
+            <td class="text-end text-danger fw-bold">$${parseFloat(d.saldo_total).toFixed(2)}</td>
+            <td class="text-center">${d.dias_vencida}d</td>
+            <td>${notifSet.has(d.id_cliente) ? '<span class="badge bg-success">✅</span>' : '<span class="badge bg-warning text-dark">⏳</span>'}</td>
+        </tr>`).join('');
+        res.end(`<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><title>Recordatorios de Pago</title><style>body{background:#f4f7f6}.card-custom{border-radius:15px;border:none;box-shadow:0 4px 12px rgba(0,0,0,0.08)}</style></head><body>${header}
+        <div class="container-fluid px-4 mt-3">
+        ${query.error ? `<div class="alert alert-danger">❌ ${query.error}</div>` : ''}
+        ${query.success ? `<div class="alert alert-success">✅ ${query.success}</div>` : ''}
+        <details class="mb-2" style="max-width:500px">
+        <summary style="cursor:pointer;font-size:0.9rem">⚙️ Configurar envíos</summary>
+        <div class="card card-body p-2 mb-2">
+        <div class="row g-2 align-items-end">
+            <div class="col-auto"><label class="small">Bloque</label><input type="number" id="cfgBatch" class="form-control form-control-sm" value="${sendConfig.batchSize}" style="width:80px"></div>
+            <div class="col-auto"><label class="small">Pausa/msg (seg)</label><input type="number" id="cfgPauseSend" class="form-control form-control-sm" value="${sendConfig.pauseSend/1000}" style="width:90px"></div>
+            <div class="col-auto"><label class="small">Pausa/lote (min)</label><input type="number" id="cfgPauseBatch" class="form-control form-control-sm" value="${sendConfig.pauseBatch/60000}" style="width:90px"></div>
+            <div class="col-auto"><button onclick="guardarConfigRec()" class="btn btn-sm btn-outline-dark">Guardar</button></div>
+        </div></div></details>
+        <div class="card card-custom p-4 mb-4">
+        <div class="row align-items-end">
+            <div class="col-md-4"><h4>📢 Recordatorios de Pago</h4><p class="text-muted small">Clientes con facturas vencidas.</p></div>
+            <div class="col-md-4">
+            <form method="GET" action="/recordatorio-estado" class="row g-2">
+                <div class="col-6">
+                    <label class="small fw-bold">Zona:</label>
+                    <select name="zona" class="form-select form-select-sm"><option value="">Todas</option>${zonaOpts}</select>
+                </div>
+                <div class="col-6">
+                    <label class="small fw-bold">Vendedor:</label>
+                    <select name="vendedor" class="form-select form-select-sm"><option value="">Todos</option>${vendOpts}</select>
+                </div>
+                <div class="col-12 mt-2"><button type="submit" class="btn btn-dark w-100 btn-sm">Filtrar</button></div>
+            </form>
+            </div>
+            <div class="col-md-4 text-end">
+                <button onclick="enviarRecordatorio()" class="btn btn-danger btn-lg px-4 shadow">🚀 Enviar a Seleccionados</button>
+                <a href="/recordatorio-estado?force=1" class="btn btn-warning btn-sm mt-1">📨 Forzar Todos</a>
+                <div id="statusRec" class="mt-1 small fw-bold"></div>
+            </div>
+        </div>
+        </div>
+        <div class="card card-custom p-4">
+        <div class="d-flex justify-content-between align-items-center mb-2">
+            <h5>Deudores (${deudores.length})</h5>
+            <div><input class="form-check-input" type="checkbox" id="selectAllRec" checked onclick="toggleAllRec()"> <label class="form-check-label small">Sel. Todos</label></div>
+        </div>
+        <div class="table-responsive">
+        <table class="table table-hover align-middle table-sm">
+        <thead class="table-light"><tr><th style="width:40px">Sel</th><th>Cliente</th><th>Celular</th><th>Zona</th><th>Vendedor</th><th class="text-center">Fact.</th><th class="text-end">Saldo</th><th class="text-center">Días</th><th>Notif.</th></tr></thead>
+        <tbody>${filas}</tbody></table></div>
+        </div></div>
+        <script>
+        function toggleAllRec(){const ch=document.getElementById('selectAllRec').checked;document.querySelectorAll('.cliente-check-rec').forEach(c=>c.checked=ch);}
+        async function guardarConfigRec(){
+            const d={batchSize:document.getElementById('cfgBatch').value,pauseSend:document.getElementById('cfgPauseSend').value*1000,pauseBatch:document.getElementById('cfgPauseBatch').value*60000};
+            try{await fetch('/set-send-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});alert('Config guardada.');}catch(e){alert('Error: '+e.message);}
+        }
+        async function enviarRecordatorio(){
+            const sel=Array.from(document.querySelectorAll('.cliente-check-rec:checked')).map(c=>c.value);
+            if(sel.length===0)return alert("Selecciona al menos un cliente.");
+            if(!confirm("Enviar recordatorio a "+sel.length+" cliente(s)?"))return;
+            const st=document.getElementById('statusRec');st.className="mt-1 small fw-bold text-primary";st.innerHTML="⏳ Enviando...";
+            try{
+                const r=await fetch('/enviar-recordatorio-estado',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({clientes:sel})});
+                const t=await r.text();alert(t);st.className="mt-1 small fw-bold text-success";st.innerHTML="✅ Enviado!";
+            }catch(e){st.className="mt-1 small fw-bold text-danger";st.innerHTML="❌ "+e.message;}
+        }
+        </script>
+        </body></html>`);
+    } else if (routename === '/agendar-zona' && req.method === 'POST') {
+        let b = ''; req.on('data', c => b += c);
+        req.on('end', async () => {
+            try {
+                const data = JSON.parse(b);
+                const { zona, fecha, frecuencia } = data;
+                if (!zona || !fecha) { res.end("Faltan datos."); return; }
+                const [clientes] = await pool.execute("SELECT id_cliente, nombres, direccion, telefono, celular, zona, vendedor FROM tab_clientes WHERE zona = ? AND activo = 'si'", [zona]);
+                if (clientes.length === 0) { res.end("No hay clientes en esa zona."); return; }
+                res.end(`✅ ${clientes.length} visita(s) agendada(s) para el ${fecha}.`);
+                setTimeout(async () => {
+                    let ins = 0;
+                    for (const c of clientes) {
+                        const vendNom = c.vendedor || '';
+                        const [vend] = await pool.execute("SELECT id_vendedor FROM tab_vendedores WHERE nombre = ? LIMIT 1", [vendNom]);
+                        const idV = vend.length > 0 ? vend[0].id_vendedor : 0;
+                        await dualExecute(
+                            "INSERT IGNORE INTO tab_agenda_visitas (id_cliente, fecha, estado, frecuencia_dias, observacion) VALUES (?, ?, 'pendiente', ?, ?)",
+                            [c.id_cliente, fecha, parseInt(frecuencia) || null, 'Agendamiento masivo por zona']
+                        );
+                        ins++;
+                        await sleep(500);
+                    }
+                    console.log(`[AGENDAR ZONA] ${ins} visitas creadas para zona ${zona}`);
+                }, 500);
+            } catch (e) { res.end("Error: " + e.message); }
+        });
+    } else if (routename === '/mover-visitas' && req.method === 'POST') {
+        let b = ''; req.on('data', c => b += c);
+        req.on('end', async () => {
+            try {
+                const data = JSON.parse(b);
+                const { desde, hasta } = data;
+                if (!desde || !hasta) { res.end("Faltan fechas."); return; }
+                const [result] = await dualExecute("UPDATE tab_agenda_visitas SET fecha = ? WHERE fecha = ? AND estado IN ('pendiente','no_contesto','ausente','pospuso')", [hasta, desde]);
+                res.end(`✅ ${result.affectedRows} visita(s) movida(s) de ${desde} a ${hasta}.`);
+            } catch (e) { res.end("Error: " + e.message); }
+        });
+    } else if (routename === '/sync-agenda') {
+        try {
+            const sqlCreate = `CREATE TABLE IF NOT EXISTS tab_agenda_visitas (
+                id_agenda INT AUTO_INCREMENT PRIMARY KEY,
+                id_cliente INT NOT NULL,
+                fecha DATE NOT NULL,
+                hora TIME DEFAULT NULL,
+                frecuencia_dias INT DEFAULT NULL,
+                estado VARCHAR(20) DEFAULT 'pendiente',
+                fecha_origen DATE DEFAULT NULL,
+                observacion TEXT DEFAULT NULL,
+                UNIQUE KEY uq_cliente_fecha (id_cliente, fecha),
+                INDEX idx_fecha_estado (fecha, estado),
+                INDEX idx_cliente (id_cliente)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_spanish_ci`;
+            try { await poolLocal.execute(sqlCreate); } catch(e) {}
+            try { await pool.execute(sqlCreate); } catch(e) {}
+            const [locales] = await poolLocal.execute("SELECT * FROM tab_agenda_visitas ORDER BY id_agenda");
+            let insertados = 0;
+            for (const rec of locales) {
+                const [existe] = await pool.execute("SELECT id_agenda FROM tab_agenda_visitas WHERE id_agenda = ?", [rec.id_agenda]);
+                if (existe.length === 0) {
+                    try {
+                        await pool.execute(
+                            "INSERT INTO tab_agenda_visitas (id_agenda, id_cliente, fecha, hora, frecuencia_dias, estado, fecha_origen, observacion) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                            [rec.id_agenda, rec.id_cliente, rec.fecha, rec.hora || null, rec.frecuencia_dias || null, rec.estado || 'pendiente', rec.fecha_origen || null, rec.observacion || null]
+                        );
+                        insertados++;
+                    } catch (e) { console.log("[SYNC] Error insertando id_agenda=" + rec.id_agenda + ":", e.message); }
+                }
+            }
+            res.end(`<html><body style="font-family:sans-serif;padding:20px"><h2>✅ Sincronización completada</h2><p>Registros locales: ${locales.length}</p><p>Copiados a remoto: ${insertados}</p><p>Ya existían en remoto: ${locales.length - insertados}</p><a href="/" style="display:inline-block;margin-top:12px;padding:8px 20px;background:#333;color:#fff;border-radius:6px;text-decoration:none">Volver</a></body></html>`);
+        } catch (e) { res.end("Error: " + e.message); }
+    } else if (routename === '/historial-cliente') {
+        const idCliente = parseInt(url.searchParams.get('id_cliente')) || 0;
+        if (!idCliente) { res.end(JSON.stringify([])); return; }
+        try {
+            const [rows] = await pool.execute("SELECT a.id_agenda, a.fecha, a.estado, a.observacion FROM tab_agenda_visitas a WHERE a.id_cliente = ? ORDER BY a.fecha DESC LIMIT 20", [idCliente]);
+            res.end(JSON.stringify(rows));
+        } catch (e) { res.end(JSON.stringify([])); }
     } else {
-        res.end(`<!DOCTYPE html><html><head><meta charset="UTF-8"><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><meta http-equiv="refresh" content="30"><title>Admin ONE4CARS</title></head><body style="background-color: #f4f7f6;">${header}<div class="container text-center"><div class="card shadow-lg p-4 mx-auto" style="max-width: 500px; border-radius: 15px;"><h4 class="mb-3">Estado del Bot</h4><div class="my-4">${qrCodeData.startsWith('data') ? `<img src="${qrCodeData}" class="img-fluid rounded" style="max-width: 250px;">` : `<h2 class="text-success">${qrCodeData}</h2>`}</div><p>BCV: ${dolarInfo.bcv} | Paralelo: ${dolarInfo.paralelo}</p><div class="d-grid gap-2"><a href="/cobranza" class="btn btn-primary">PANEL DE COBRANZA</a><a href="/marketing-panel" class="btn btn-info text-white">PANEL DE MARKETING</a><a href="/notificador-estado" class="btn btn-secondary text-white">NOTIFICADOR</a><a href="/historial" class="btn btn-info text-white">HISTORIAL</a><a href="/recordatorio-estado" class="btn btn-warning text-dark">RECORDATORIOS</a></div></div></div></body></html>`);
+        const [zonas] = await pool.execute("SELECT DISTINCT zona FROM tab_clientes WHERE zona != '' AND zona IS NOT NULL ORDER BY zona");
+        const zonaOptsMain = zonas.map(z => `<option value="${z.zona}">${z.zona}</option>`).join('');
+        const [stats] = await pool.execute("SELECT COUNT(*) as total FROM tab_agenda_visitas WHERE estado IN ('pendiente','no_contesto','ausente','pospuso') OR estado IS NULL");
+        const pendientes = stats[0]?.total || 0;
+        const hoyStr = new Date().toISOString().split('T')[0];
+        const [hoyVis] = await pool.execute("SELECT a.id_agenda, a.id_cliente, a.fecha, a.hora, c.nombres, c.celular, c.zona, c.direccion, c.vendedor FROM tab_agenda_visitas a JOIN tab_clientes c ON a.id_cliente = c.id_cliente WHERE a.fecha = ? AND (a.estado IN ('pendiente','no_contesto','ausente','pospuso') OR a.estado IS NULL) ORDER BY c.zona, c.nombres", [hoyStr]);
+        const hoyTotal = hoyVis.length;
+        const hoyZonas = [...new Set(hoyVis.map(v => v.zona))];
+        const hoyMapLink = hoyVis.map(v => encodeURIComponent(v.direccion || v.nombres)).filter(Boolean).join('/');
+        const hoyGmaps = hoyMapLink ? `https://www.google.com/maps/dir/${hoyMapLink}` : '';
+        res.end(`<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+<meta http-equiv="refresh" content="30">
+<title>ONE4CARS Admin</title>
+<style>
+body{background:linear-gradient(135deg,#0f0c29,#302b63,#24243e);min-height:100vh;font-family:'Segoe UI',system-ui,sans-serif}
+.card-dash{background:rgba(255,255,255,0.06);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border:1px solid rgba(255,255,255,0.1);border-radius:20px;color:#fff;transition:transform 0.2s,box-shadow 0.2s}
+.card-dash:hover{transform:translateY(-4px);box-shadow:0 12px 40px rgba(0,0,0,0.4)}
+.card-dash .card-body{padding:1.25rem}
+.card-dash .icon-box{width:48px;height:48px;border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:1.5rem}
+.card-dash .btn{font-size:0.85rem;font-weight:600;letter-spacing:0.3px;border-radius:12px;padding:0.5rem 1rem}
+.header-gradient{background:rgba(0,0,0,0.3);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border-bottom:1px solid rgba(255,255,255,0.08)}
+.dolar-badge{background:rgba(255,255,255,0.08);border-radius:12px;padding:0.35rem 0.85rem;font-size:0.8rem}
+.qr-container img{border-radius:16px;background:#fff;padding:8px}
+.stat-box{background:rgba(255,255,255,0.06);border-radius:14px;padding:0.75rem;text-align:center}
+.stat-box .num{font-size:1.5rem;font-weight:700}
+@media(max-width:576px){
+.card-dash .card-body{padding:1rem}
+.card-dash .btn{font-size:0.8rem;padding:0.4rem 0.75rem}
+.stat-box .num{font-size:1.2rem}
+.dolar-badge{font-size:0.7rem}
+}
+</style>
+</head>
+<body>
+<nav class="navbar navbar-dark header-gradient mb-4">
+<div class="container">
+<a class="navbar-brand fw-bold" href="/" style="font-size:1.1rem;letter-spacing:-0.3px">
+<i class="bi bi-speedometer2 me-2"></i>ONE4CARS
+</a>
+<div class="d-flex align-items-center gap-2">
+<span class="dolar-badge text-white-50"><i class="bi bi-currency-dollar"></i> BCV ${dolarInfo.bcv}</span>
+<span class="dolar-badge text-white-50"><i class="bi bi-currency-exchange"></i> $ ${dolarInfo.paralelo}</span>
+<span class="badge ${qrCodeData === 'ONLINE ✅' ? 'bg-success' : 'bg-danger'}" style="border-radius:20px;font-size:0.7rem">
+${qrCodeData === 'ONLINE ✅' ? '🟢 Online' : '🔴 Offline'}
+</span>
+</div>
+</div>
+</nav>
+<div class="container pb-4">
+${qrCodeData.startsWith('data') ? `
+<div class="row mb-4 justify-content-center">
+<div class="col-12 col-sm-6 col-md-4">
+<div class="card-dash p-4 text-center">
+<h6 class="text-white-50 mb-3"><i class="bi bi-qr-code me-2"></i>Escanee el QR</h6>
+<div class="qr-container">${qrCodeData.startsWith('data') ? `<img src="${qrCodeData}" class="img-fluid" style="max-width:220px">` : ''}</div>
+<p class="text-white-50 small mt-2">Conecte su WhatsApp para usar el bot</p>
+<a href="/reset-sesion" class="btn btn-outline-light btn-sm mt-2" onclick="return confirm('¿Borrar sesión y generar nuevo QR?')"><i class="bi bi-arrow-repeat me-1"></i>Nuevo QR</a>
+</div>
+</div>
+</div>
+` : ''}
+<div class="row mb-3 g-2">
+<div class="col-12 col-sm-6">
+<div class="card-dash">
+<div class="card-body d-flex align-items-center justify-content-between">
+<div>
+<h6 class="text-white-50 mb-1" style="font-size:0.75rem"><i class="bi bi-calendar-day me-1"></i>Visitas de Hoy</h6>
+<span class="fw-bold" style="font-size:1.3rem">${hoyTotal}</span>
+<small class="text-white-50 ms-2">${hoyZonas.length} zona(s)</small>
+</div>
+<div class="d-flex gap-2">
+${hoyGmaps ? `<a href="${hoyGmaps}" target="_blank" class="btn btn-sm" style="background:rgba(25,135,84,0.2);color:#75b798;border-radius:12px"><i class="bi bi-geo-alt-fill me-1"></i>Salir a Visitar</a>` : ''}
+<a href="/visitas?fecha=${hoyStr}" class="btn btn-sm" style="background:rgba(13,110,253,0.2);color:#6ea8fe;border-radius:12px"><i class="bi bi-list-ul me-1"></i>Ver</a>
+</div>
+</div>
+</div>
+</div>
+${hoyVis.length > 0 ? `
+<div class="col-12 col-sm-6">
+<div class="card-dash">
+<div class="card-body" style="max-height:100px;overflow-y:auto">
+<div style="font-size:0.7rem;color:rgba(255,255,255,0.5)">${hoyVis.slice(0,6).map(v => `<span class="me-3 d-inline-block"><span style="color:#${v.zona ? ['f5a','6ea','8f8','f88','8af','fa8','af8','faf','aaf','ff8'][Math.abs(v.zona.charCodeAt(0)||0)%10] : 'aaa'}">●</span> ${v.nombres.split(' ').slice(0,2).join(' ')} ${v.zona ? '('+v.zona+')' : ''}</span>`).join('')}${hoyVis.length > 6 ? `<span class="text-white-50">+${hoyVis.length-6} más</span>` : ''}</div>
+</div>
+</div>
+</div>` : ''}
+</div>
+<div class="row g-3">
+<div class="col-6 col-sm-4 col-md-3">
+<a href="/cobranza" class="text-decoration-none">
+<div class="card-dash h-100">
+<div class="card-body">
+<div class="d-flex align-items-center gap-3 mb-2">
+<div class="icon-box" style="background:rgba(13,110,253,0.2);color:#6ea8fe"><i class="bi bi-cash-stack"></i></div>
+<small class="text-white-50 text-uppercase" style="font-size:0.65rem;letter-spacing:0.5px">Cobranza</small>
+</div>
+<span class="fw-bold" style="font-size:0.95rem">Panel de Cobros</span>
+</div>
+</div>
+</a>
+</div>
+<div class="col-6 col-sm-4 col-md-3">
+<a href="/recordatorio-estado" class="text-decoration-none">
+<div class="card-dash h-100">
+<div class="card-body">
+<div class="d-flex align-items-center gap-3 mb-2">
+<div class="icon-box" style="background:rgba(255,193,7,0.2);color:#ffda6a"><i class="bi bi-bell-fill"></i></div>
+<small class="text-white-50 text-uppercase" style="font-size:0.65rem;letter-spacing:0.5px">Recordatorios</small>
+</div>
+<span class="fw-bold" style="font-size:0.95rem">Deudas vencidas</span>
+</div>
+</div>
+</a>
+</div>
+<div class="col-6 col-sm-4 col-md-3">
+<a href="/recordatorio-visita" class="text-decoration-none">
+<div class="card-dash h-100">
+<div class="card-body">
+<div class="d-flex align-items-center gap-3 mb-2">
+<div class="icon-box" style="background:rgba(220,53,69,0.2);color:#ea868f"><i class="bi bi-envelope-paper-fill"></i></div>
+<small class="text-white-50 text-uppercase" style="font-size:0.65rem;letter-spacing:0.5px">Rec. Visita</small>
+</div>
+<span class="fw-bold" style="font-size:0.95rem">Recordatorio visita</span>
+</div>
+</div>
+</a>
+</div>
+<div class="col-6 col-sm-4 col-md-3">
+<a href="/visitas" class="text-decoration-none">
+<div class="card-dash h-100">
+<div class="card-body">
+<div class="d-flex align-items-center gap-3 mb-2">
+<div class="icon-box" style="background:rgba(25,135,84,0.2);color:#75b798"><i class="bi bi-calendar-check-fill"></i></div>
+<small class="text-white-50 text-uppercase" style="font-size:0.65rem;letter-spacing:0.5px">Visitas</small>
+</div>
+<span class="fw-bold" style="font-size:0.95rem">Agenda (${pendientes} pend.)</span>
+</div>
+</div>
+</a>
+</div>
+<div class="col-6 col-sm-4 col-md-3">
+<a href="/notificador-estado" class="text-decoration-none">
+<div class="card-dash h-100">
+<div class="card-body">
+<div class="d-flex align-items-center gap-3 mb-2">
+<div class="icon-box" style="background:rgba(108,117,125,0.2);color:#b0b5ba"><i class="bi bi-megaphone-fill"></i></div>
+<small class="text-white-50 text-uppercase" style="font-size:0.65rem;letter-spacing:0.5px">Notificador</small>
+</div>
+<span class="fw-bold" style="font-size:0.95rem">Envíos automáticos</span>
+</div>
+</div>
+</a>
+</div>
+<div class="col-6 col-sm-4 col-md-3">
+<a href="/marketing-panel" class="text-decoration-none">
+<div class="card-dash h-100">
+<div class="card-body">
+<div class="d-flex align-items-center gap-3 mb-2">
+<div class="icon-box" style="background:rgba(13,202,240,0.2);color:#6edff6"><i class="bi bi-megaphone"></i></div>
+<small class="text-white-50 text-uppercase" style="font-size:0.65rem;letter-spacing:0.5px">Marketing</small>
+</div>
+<span class="fw-bold" style="font-size:0.95rem">Campañas masivas</span>
+</div>
+</div>
+</a>
+</div>
+<div class="col-6 col-sm-4 col-md-3">
+<a href="/historial" class="text-decoration-none">
+<div class="card-dash h-100">
+<div class="card-body">
+<div class="d-flex align-items-center gap-3 mb-2">
+<div class="icon-box" style="background:rgba(111,66,193,0.2);color:#b78ee8"><i class="bi bi-chat-dots-fill"></i></div>
+<small class="text-white-50 text-uppercase" style="font-size:0.65rem;letter-spacing:0.5px">Historial</small>
+</div>
+<span class="fw-bold" style="font-size:0.95rem">Chats</span>
+</div>
+</div>
+</a>
+</div>
+<div class="col-6 col-sm-4 col-md-3">
+<a href="/reset-sesion" class="text-decoration-none" onclick="return confirm('¿Borrar sesión del bot?')">
+<div class="card-dash h-100">
+<div class="card-body">
+<div class="d-flex align-items-center gap-3 mb-2">
+<div class="icon-box" style="background:rgba(255,255,255,0.08);color:#fff"><i class="bi bi-arrow-repeat"></i></div>
+<small class="text-white-50 text-uppercase" style="font-size:0.65rem;letter-spacing:0.5px">Reset</small>
+</div>
+<span class="fw-bold" style="font-size:0.95rem">Nuevo QR</span>
+</div>
+</div>
+</a>
+</div>
+<div class="col-6 col-sm-4 col-md-3">
+<a href="/sync-agenda" class="text-decoration-none" onclick="return confirm('¿Sincronizar agenda local → remoto?')">
+<div class="card-dash h-100">
+<div class="card-body">
+<div class="d-flex align-items-center gap-3 mb-2">
+<div class="icon-box" style="background:rgba(13,202,240,0.2);color:#6edff6"><i class="bi bi-cloud-arrow-up"></i></div>
+<small class="text-white-50 text-uppercase" style="font-size:0.65rem;letter-spacing:0.5px">Sync</small>
+</div>
+<span class="fw-bold" style="font-size:0.95rem">Sincronizar Agenda</span>
+</div>
+</div>
+</a>
+</div>
+</div>
+<div class="row mt-4">
+<div class="col-12">
+<div class="card-dash">
+<div class="card-body">
+<div class="row g-2 align-items-end">
+<div class="col-12 col-sm-6 col-md-3">
+<label class="text-white-50 small fw-bold mb-1"><i class="bi bi-geo-alt me-1"></i>Zona</label>
+<select id="zonaSel" class="form-select form-select-sm" style="background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.15);color:#fff;border-radius:10px">${zonaOptsMain}</select>
+</div>
+<div class="col-6 col-sm-4 col-md-2">
+<label class="text-white-50 small fw-bold mb-1"><i class="bi bi-calendar me-1"></i>Fecha</label>
+<input type="date" id="fechaSel" class="form-control form-control-sm" style="background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.15);color:#fff;border-radius:10px">
+</div>
+<div class="col-6 col-sm-2 col-md-2">
+<label class="text-white-50 small fw-bold mb-1"><i class="bi bi-arrow-repeat me-1"></i>Días</label>
+</div>
+<div class="col-12 col-sm-4 col-md-3">
+<button onclick="agendarZona()" class="btn btn-success w-100" style="border-radius:10px;font-weight:600"><i class="bi bi-calendar-plus me-1"></i>Agendar Zona</button>
+</div>
+<div class="col-12"><div id="statusZona" class="small fw-bold mt-1"></div></div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+<script>
+async function agendarZona(){
+    const zona=document.getElementById('zonaSel').value;
+    const fecha=document.getElementById('fechaSel').value;
+    const frecuencia=document.getElementById('frecSel').value;
+    if(!zona||!fecha)return alert("Selecciona zona y fecha.");
+    if(!confirm("Agendar visitas para toda la zona "+zona+" el "+fecha+"?"))return;
+    const st=document.getElementById('statusZona');st.className="small fw-bold text-info";st.innerHTML="⏳ Agendando...";
+    try{
+        const r=await fetch('/agendar-zona',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({zona,fecha,frecuencia})});
+        const t=await r.text();alert(t);st.innerHTML="✅ "+t;
+    }catch(e){st.innerHTML="❌ "+e.message;}
+}
+document.querySelectorAll('#frecSel, #zonaSel, #fechaSel').forEach(el => {
+    el.addEventListener('keydown', e => { if(e.key==='Enter') agendarZona(); });
+});
+</script>
+</body>
+</html>`);
     }
 });
 
 server.listen(PORT, '0.0.0.0', async () => {
     await initDB();
+    await restaurarSesiones();
     startBot();
     actualizarDolar();
     setInterval(actualizarDolar, 3600000);
