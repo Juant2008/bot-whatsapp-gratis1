@@ -2648,7 +2648,7 @@ Mientras tanto, puede consultar el detalle de sus facturas pendientes aquí:
                     const contieneKeyword = PRODUCT_KEYWORDS.some(kw => txtNormal.includes(kw));
                     const tieneCodigo = palabrasEnMensaje.some(p => {
                         const c = p.replace(/[^a-zA-Z0-9]/g, '');
-                        return c.length >= 4 && /[A-Za-z]/.test(c) && /[0-9]/.test(c);
+                        return c.length >= 4 && ((/[A-Za-z]/.test(c) && /[0-9]/.test(c)) || /^\d{4,}$/.test(c));
                     });
 
                     let prods = null;
@@ -2656,7 +2656,7 @@ Mientras tanto, puede consultar el detalle de sus facturas pendientes aquí:
                     // Buscar por código primero
                     for (const p of palabrasEnMensaje) {
                         const codCandidato = p.replace(/[^a-zA-Z0-9]/g, '');
-                        if (codCandidato.length >= 4 && /[A-Za-z]/.test(codCandidato) && /[0-9]/.test(codCandidato)) {
+                        if ((codCandidato.length >= 4 && /[A-Za-z]/.test(codCandidato) && /[0-9]/.test(codCandidato)) || /^\d{4,}$/.test(codCandidato)) {
                             prods = await buscarProductoPorCodigo(codCandidato);
                             if (prods) break;
                         }
