@@ -638,7 +638,7 @@ async function buscarClientePorNombreYVendedor(nombreCliente, nombreVendedor) {
             [`%${nombreVendedor}%`, `%${nombreCliente}%`]
         );
         return r2[0] || null;
-    } catch (e) { return null; }
+    } catch (e) { console.log("[BUSCAR_CLIENTE] Error en buscarClientePorNombreYVendedor:", e.sqlMessage || e.message); return null; }
 }
 
 async function buscarClientePorPalabras(palabras, nombreVendedor, textoOriginal) {
@@ -697,7 +697,7 @@ async function buscarClientePorPalabras(palabras, nombreVendedor, textoOriginal)
             params5
         );
         return r5[0] || null;
-    } catch (e) { return null; }
+    } catch (e) { console.log("[BUSCAR_CLIENTE] Error en buscarClientePorPalabras:", e.sqlMessage || e.message); return null; }
 }
 
 function extraerPalabrasClave(rawText, itemsPedido) {
@@ -2147,6 +2147,14 @@ Mientras tanto, puede consultar el detalle de sus facturas pendientes aquí:
                     }
                 }
                 if (!clienteEncontrado) {
+                    try {
+                        const [debugRows] = await pool.execute("SELECT id_cliente, nombres, vendedor, activo FROM tab_clientes WHERE nombres LIKE ? LIMIT 5", [`%${nombreClienteBusqueda}%`]);
+                        console.log("[DEBUG_CLIENTE] Búsqueda falló para:", nombreClienteBusqueda, "Resultados LIKE:", JSON.stringify(debugRows));
+                        if (debugRows.length === 0) {
+                            const [allRows] = await pool.execute("SELECT id_cliente, nombres, vendedor, activo FROM tab_clientes WHERE vendedor = ? LIMIT 5", [vendedorSesion?.nombre || '']);
+                            console.log("[DEBUG_CLIENTE] Clientes del vendedor:", JSON.stringify(allRows));
+                        }
+                    } catch (de) { console.log("[DEBUG_CLIENTE] Error debug:", de.message); }
                     await safeSendMessage(from, { text: `❌ No encontré un cliente llamado "*${nombreClienteBusqueda}*".\n\nEscriba el nombre exacto o *cancelar* para cancelar el pedido.` });
                     return;
                 }
@@ -2253,6 +2261,10 @@ Mientras tanto, puede consultar el detalle de sus facturas pendientes aquí:
                     }
                 }
                 if (!clienteEncontrado) {
+                    try {
+                        const [debugRows] = await pool.execute("SELECT id_cliente, nombres, vendedor, activo FROM tab_clientes WHERE nombres LIKE ? LIMIT 5", [`%${nombreCliente}%`]);
+                        console.log("[DEBUG_CLIENTE_MULTI] Búsqueda falló para:", nombreCliente, "Resultados LIKE:", JSON.stringify(debugRows));
+                    } catch (de) { console.log("[DEBUG_CLIENTE] Error debug:", de.message); }
                     await safeSendMessage(from, { text: `❌ No encontré un cliente llamado "*${nombreCliente}*".\n\nEscriba el nombre exacto o *cancelar* para cancelar el pedido.` });
                     return;
                 }
