@@ -144,6 +144,28 @@ const pendingProductSelection = new Map();
 const multiItemOrders = new Map();
 const lastFallbackSent = new Map();
 const FALLBACK_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutos
+const lastMessageTimes = new Map(); // Evitar respuestas duplicadas
+const DUPLICATE_COOLDOWN_MS = 10000; // 10 segundos
+
+// Frases de auto-respuesta automática de clientes (mensajes de bienvenida/auto-reply) que deben ignorarse
+const AUTO_REPLY_CLIENTE = [
+    'gracias por comunicarte con el departamento de compras',
+    'gracias por comunicarte con el departamento de ventas',
+    'gracias por comunicarte con',
+    'favor indícanos nombre de la empresa',
+    'apóyanos con la siguiente información',
+    'cuáles son tus 3 productos',
+    'condiciones de pago, descuentos y días de crédito',
+    'envía también la lista al correo',
+    'para comunicarse con ventas',
+    'mensaje automático',
+    'auto-reply',
+    'automatic reply',
+    'soy un bot',
+    'soy el asistente virtual',
+    'en breve te atenderemo',
+    'este es un mensaje automático'
+];
 
 const VISIT_KEYWORDS = [
     'me visite', 'me visiten', 'me visita', 'pase por', 'pasar por',
@@ -1669,6 +1691,30 @@ async function startBot() {
             const esRIFPuro = /^[VJGE]\d{8,9}$/.test(textoLimpioParaRif);
 
             await guardarMensaje(from, 'user', rawText);
+
+            // Evitar respuestas duplicadas (mismo texto, mismo remitente, en menos de 10 segundos)
+            const msgKey = `${from}:${rawText}`;
+            const ahoraMs = Date.now();
+            const ultimoMsg = lastMessageTimes.get(msgKey) || 0;
+            if (ahoraMs - ultimoMsg < DUPLICATE_COOLDOWN_MS) {
+                console.log(`[DEDUP] Ignorando mensaje duplicado de ${from.split('@')[0]}`);
+                return;
+            }
+            lastMessageTimes.set(msgKey, ahoraMs);
+            // Limpiar entradas viejas del mapa
+            if (lastMessageTimes.size > 1000) {
+                const exp = ahoraMs - 60000;
+                for (const [k, v] of lastMessageTimes) { if (v < exp) lastMessageTimes.delete(k); }
+            }
+
+            // Ignorar auto-reply de clientes (mensajes automáticos de bienvenida)
+            const rawLower = rawText.toLowerCase();
+            const esAutoReplyCliente = AUTO_REPLY_CLIENTE.some(f => rawLower.includes(f));
+            if (esAutoReplyCliente) {
+                console.log(`[AUTO_REPLY] Ignorando auto-respuesta de ${from.split('@')[0]}`);
+                return;
+            }
+
             const sesion = await getSesion(from);
             let nombreAlmacenado = null;
             if (sesion && sesion.datos) {
@@ -2140,11 +2186,12 @@ Mientras tanto, puede consultar el detalle de sus facturas pendientes aquí:
                         tipo: 'esperando_cliente',
                         itemsPedido: datosSesion.itemsPedido,
                         pushName: datosSesion.pushName,
-                        vendedor: { id_vendedor: vendedorEncontrado.id_vendedor, nombre: nombreVend, celular_vendedor: vendedorEncontrado.celular_vendedor, subVendedor }
+                        vendedor: { id_vendedor: vendedorEncontrado.id_vendedor, nombre: vendedorEncontrado.nombre, celular_vendedor: vendedorEncontrado.celular_vendedor, subVendedor }
                     });
                     await setModo(from, 'esperando_cliente');
                     const itemsTemp = datosSesion.itemsPedido.map(it => `${it.codigo} ${it.cantidad}`).join(', ');
-                    await safeSendMessage(from, { text: `✅ Vendedor: *${nombreVend}*\n\n🔍 *Pedido de ${datosSesion.itemsPedido.length} producto(s):*\n${itemsTemp}\n\n❓ *¿Para qué cliente es este pedido?*\nEscriba el nombre o razón social del cliente.` });
+                    const nombreVendDisplay = subVendedor || vendedorEncontrado.nombre;
+                    await safeSendMessage(from, { text: `✅ Vendedor: *${nombreVendDisplay}*\n\n🔍 *Pedido de ${datosSesion.itemsPedido.length} producto(s):*\n${itemsTemp}\n\n❓ *¿Para qué cliente es este pedido?*\nEscriba el nombre o razón social del cliente.` });
                     return;
                 }
             }
@@ -2365,15 +2412,16 @@ Mientras tanto, puede consultar el detalle de sus facturas pendientes aquí:
                             ? (data.vendedor?.celular_vendedor || `LID:${rawTel}`)
                             : rawTel;
                         const tot = data.items.reduce((s, it) => s + it.precio * it.cantidad, 0);
-                        const nombreVendedorFinal = data.vendedor?.subVendedor || data.vendedor?.nombre || '';
+                        const nombreVendedorFinal = data.vendedor?.nombre || '';
+                        const subVendedorFinal = data.vendedor?.subVendedor || null;
                         await pool.execute("INSERT INTO tab_pedidos (nro_factura, fecha_reg, nombres, celular, total, id_vendedor, vendedor, sub_vendedor, celular_vendedor, pagada, anulado) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'NO', 'no')",
-                            [nro, hoy, data.cliente?.nombres || data.pushName || 'Cliente', tel, tot, data.vendedor?.id_vendedor || 0, nombreVendedorFinal, data.vendedor?.subVendedor || null, data.vendedor?.celular_vendedor || '']);
+                            [nro, hoy, data.cliente?.nombres || data.pushName || 'Cliente', tel, tot, data.vendedor?.id_vendedor || 0, nombreVendedorFinal, subVendedorFinal, data.vendedor?.celular_vendedor || '']);
                         const [pedido] = await pool.execute("SELECT MAX(id_factura) as id FROM tab_pedidos");
                         const idPed = pedido[0].id;
                         const ahora = new Date().toISOString().slice(0, 19).replace('T', ' ');
                         console.log("[ORDEN] Insertando orden, cliente:", data.cliente?.nombres || data.pushName, "total:", tot, "vendedor:", data.vendedor?.nombre);
                         try {
-                            const comentariosOrden = data.vendedor?.subVendedor ? `Vendedor: ${data.vendedor.subVendedor}` : '';
+                            const comentariosOrden = subVendedorFinal ? `Vendedor real: ${subVendedorFinal}` : '';
                             const [ordenResult] = await pool.execute(
                                 "INSERT INTO orden (customer_id, cedula, nombres, direccion, celular, id_vendedor, vendedor, total_price, created, modified, status, facturado, pendiente, forma_de_pago, facturar, comentarios) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '1', 'NO', 'NO', '', '', ?)",
                                 [data.cliente?.id_cliente || 0, data.cliente?.cedula || '', data.cliente?.nombres || data.pushName || 'Cliente', data.cliente?.direccion || '', tel, data.vendedor?.id_vendedor || 0, nombreVendedorFinal, tot, ahora, ahora, comentariosOrden]
