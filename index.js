@@ -1975,7 +1975,7 @@ async function startBot() {
                             if (v.zona !== zonaAct) { zonaAct = v.zona; reporte += `\n📍 *${zonaAct || 'Sin zona'}*\n`; }
                             reporte += `  ${i+1}. ${v.nombres} ${v.hora ? '🕐'+v.hora.substring(0,5) : ''}\n     📞 ${v.celular || '—'}\n`;
                         });
-                        reporte += `\n🔗 ${process.env.BASE_URL || 'https://bot-whatsapp-gratis1.onrender.com'}/visitas?fecha=${hoyStr}`;
+                        reporte += `\n🔗 ${process.env.BASE_URL || 'https://bot-whatsapp-gratis-mq8u.onrender.com'}/visitas?fecha=${hoyStr}`;
                         return await safeSendMessage(from, { text: reporte });
                     } catch (e) {
                         console.log("[VISITAS HOY] Error:", e.message);
