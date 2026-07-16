@@ -1190,6 +1190,8 @@ async function actualizarDolar() {
 
 // ===== NOTIFICADOR DE FACTURAS NUEVAS =====
 let notificadorEjecutando = false;
+const MAX_FACTURAS_POR_CICLO = 5; // Máximo de facturas nuevas por cada ciclo de 45 seg
+const DELAY_ENTRE_FACTURAS_MS = 8000; // 8 segundos entre cada factura para parecer humano
 
 async function checkNuevasFacturas() {
     if (!isBotReady() || notificadorEjecutando) return;
@@ -1201,11 +1203,18 @@ async function checkNuevasFacturas() {
              FROM tab_facturas f
              LEFT JOIN tab_vendedores v ON f.id_vendedor = v.id_vendedor
              WHERE f.whatsapp_notificado = 'NO' AND f.anulado = 'no' AND f.pagada = 'NO'
-             ORDER BY f.id_factura ASC`
+               AND f.fecha_reg >= DATE_SUB(CURDATE(), INTERVAL 2 DAY)
+             ORDER BY f.id_factura ASC
+             LIMIT ?`,
+            [MAX_FACTURAS_POR_CICLO]
         );
+        let enviados = 0;
         for (const f of facturas) {
             const jid = formatWhatsApp(f.celular);
-            if (!jid) continue;
+            if (!jid) {
+                await pool.execute("UPDATE tab_facturas SET whatsapp_notificado = 'SI' WHERE id_factura = ?", [f.id_factura]);
+                continue;
+            }
             const fecha = new Date(f.fecha_reg).toISOString().split('T')[0];
             let montoNotif = parseFloat(f.total) / (parseFloat(f.porcentaje) || 1);
             if (f.vendedor_nombre && f.vendedor_nombre.toUpperCase() === 'MANUEL FERRAZ') {
@@ -1213,6 +1222,7 @@ async function checkNuevasFacturas() {
             }
             const msg = `🧾 *NUEVA FACTURA REGISTRADA*\n\nHola *${f.nombres}*, se ha registrado una nueva factura en nuestro sistema:\n\n🔹 *N°:* ${f.nro_factura}\n🔹 *Monto:* $${montoNotif.toFixed(2)}\n🔹 *Fecha:* ${fecha}\n\nPuede consultar su estado de cuenta en:\nhttps://www.one4cars.com/estado_de_cuenta.php/`;
             await safeSendMessage(jid, { text: msg });
+            enviados++;
 
             if (f.celular_vendedor) {
                 const jidV = formatWhatsApp(f.celular_vendedor);
@@ -1223,10 +1233,10 @@ async function checkNuevasFacturas() {
             }
 
             await pool.execute("UPDATE tab_facturas SET whatsapp_notificado = 'SI' WHERE id_factura = ?", [f.id_factura]);
-            await sleep(1000);
+            await humanDelay(6, 12); // Delay humano entre cada factura
         }
-        if (facturas.length > 0) {
-            console.log(`[NOTIFICADOR] ${facturas.length} factura(s) notificada(s).`);
+        if (enviados > 0) {
+            console.log(`[NOTIFICADOR] ${enviados} factura(s) notificada(s).`);
         }
     } catch (e) {
         console.log("[NOTIFICADOR] Error:", e.message);
@@ -1237,6 +1247,7 @@ async function checkNuevasFacturas() {
 
 // ===== RECORDATORIOS DE FACTURAS VENCIDAS =====
 let recordatorioEjecutando = false;
+const MAX_RECORDATORIOS_POR_CICLO = 10; // Máximo recordatorios por cada ejecución diaria
 
 function obtenerNivelRecordatorio(dias) {
     if (dias >= 60) return 60;
@@ -1264,6 +1275,10 @@ async function checkFacturasVencidas() {
         let cont = 0;
 
         for (const f of facturas) {
+            if (cont >= MAX_RECORDATORIOS_POR_CICLO) {
+                console.log(`[RECORDATORIO] Límite de ${MAX_RECORDATORIOS_POR_CICLO} alcanzado, el resto se enviará mañana.`);
+                break;
+            }
             const dias = f.dias_vencida;
             const nivel = obtenerNivelRecordatorio(dias);
             if (!nivel) continue;
@@ -1284,7 +1299,7 @@ async function checkFacturasVencidas() {
                 }
                 await notificador.marcarRecordatorio(f.id_factura, nivel);
                 cont++;
-                await humanDelay(15, 35);
+                await humanDelay(25, 50); // Delay más largo entre recordatorios
             }
         }
 
@@ -1607,12 +1622,18 @@ async function startBot() {
             qrCodeData = "ONLINE ✅"; 
             console.log("🚀 BOT MASTER ONLINE");
             if (!notificadorInterval) {
-                notificadorInterval = setInterval(checkNuevasFacturas, 45000);
-                setInterval(checkFacturasVencidas, 86400000);
-                setInterval(checkVendedoresRecordatorio, 86400000);
-                
-                // Temporizador automático de Estadísticas activado (revisa cada 30 min)
-                setInterval(checkEstadisticasVendedores, 1800000);
+                // Esperar 30 segundos después de conectar antes de iniciar notificadores
+                // Esto evita que al reconectar se envíen todos los mensajes pendientes de golpe
+                console.log("[BOT] Esperando 30 segundos antes de activar notificadores...");
+                setTimeout(() => {
+                    console.log("[BOT] Notificadores activados.");
+                    notificadorInterval = setInterval(checkNuevasFacturas, 180000); // Cada 3 minutos en vez de 45 seg
+                    setInterval(checkFacturasVencidas, 86400000);
+                    setInterval(checkVendedoresRecordatorio, 86400000);
+                    
+                    // Temporizador automático de Estadísticas activado (revisa cada 30 min)
+                    setInterval(checkEstadisticasVendedores, 1800000);
+                }, 30000);
                 
                 setInterval(() => {
                     if (!isBotReady() && socketBot) startBot();
