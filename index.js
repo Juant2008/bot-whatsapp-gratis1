@@ -1193,6 +1193,22 @@ let notificadorEjecutando = false;
 const MAX_FACTURAS_POR_CICLO = 5; // Máximo de facturas nuevas por cada ciclo de 45 seg
 const DELAY_ENTRE_FACTURAS_MS = 8000; // 8 segundos entre cada factura para parecer humano
 
+// Marca como notificadas todas las facturas viejas al iniciar el bot para evitar envíos masivos
+async function marcarFacturasViejasComoNotificadas() {
+    try {
+        const [result] = await pool.execute(
+            `UPDATE tab_facturas SET whatsapp_notificado = 'SI'
+             WHERE whatsapp_notificado = 'NO' AND anulado = 'no' AND pagada = 'NO'
+               AND fecha_reg < DATE_SUB(CURDATE(), INTERVAL 2 DAY)`
+        );
+        if (result.affectedRows > 0) {
+            console.log(`[STARTUP] ⚠️ ${result.affectedRows} factura(s) antigua(s) marcada(s) como notificada(s) para evitar reenvío masivo.`);
+        }
+    } catch (e) {
+        console.log("[STARTUP] Error marcando facturas viejas:", e.message);
+    }
+}
+
 async function checkNuevasFacturas() {
     if (!isBotReady() || notificadorEjecutando) return;
     notificadorEjecutando = true;
