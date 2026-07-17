@@ -803,8 +803,135 @@ async function verificarCreditoCliente(id_cliente) {
 }
 
 // ===== BASE DE DATOS =====
+// ===== SINCRONIZACIÓN INTELIGENTE tab_facturas (LOCAL ↔ REMOTO) =====
+// Preserva whatsapp_notificado y whatsapp_mora al sincronizar
+async function syncFacturasLocalRemoto() {
+    try {
+        // 1. Asegurar que la BD local tenga las columnas necesarias
+        try { await poolLocal.execute("ALTER TABLE tab_facturas ADD COLUMN whatsapp_notificado VARCHAR(2) DEFAULT 'NO'"); } catch (e) {}
+        try { await poolLocal.execute("ALTER TABLE tab_facturas ADD COLUMN whatsapp_mora VARCHAR(2) DEFAULT 'NO'"); } catch (e) {}
+        try { await pool.execute("ALTER TABLE tab_facturas ADD COLUMN whatsapp_notificado VARCHAR(2) DEFAULT 'NO'"); } catch (e) {}
+        try { await pool.execute("ALTER TABLE tab_facturas ADD COLUMN whatsapp_mora VARCHAR(2) DEFAULT 'NO'"); } catch (e) {}
+
+        // 2. Obtener estados del remoto (valores que NO queremos perder)
+        const [remotoStates] = await pool.execute(
+            "SELECT id_factura, whatsapp_notificado, whatsapp_mora FROM tab_facturas WHERE whatsapp_notificado = 'SI' OR whatsapp_mora = 'SI'"
+        );
+        const remoteMap = {};
+        for (const r of remotoStates) {
+            remoteMap[r.id_factura] = { wn: r.whatsapp_notificado, wm: r.whatsapp_mora };
+        }
+
+        // 3. Obtener registros del local que no están en remoto (o están desactualizados)
+        const [locales] = await poolLocal.execute("SELECT * FROM tab_facturas");
+        let insertados = 0;
+        let actualizados = 0;
+
+        for (const f of locales) {
+            const [existeRemoto] = await pool.execute("SELECT id_factura FROM tab_facturas WHERE id_factura = ?", [f.id_factura]);
+            if (existeRemoto.length === 0) {
+                // No existe en remoto: copiar con valores por defecto de whatsapp
+                await pool.execute(
+                    `INSERT INTO tab_facturas (id_factura, nro_factura, id_cliente, nombres, cedula, celular, telefono, direccion, zona,
+                     id_vendedor, vendedor, total, abono_factura, porcentaje, fecha_reg, pagada, anulado, descuento, total_desc,
+                     whatsapp_notificado, whatsapp_mora)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'NO', 'NO')`,
+                    [f.id_factura, f.nro_factura, f.id_cliente, f.nombres, f.cedula, f.celular, f.telefono, f.direccion, f.zona,
+                     f.id_vendedor, f.vendedor, f.total, f.abono_factura, f.porcentaje, f.fecha_reg, f.pagada, f.anulado,
+                     f.descuento || 0, f.total_desc || 0]
+                );
+                insertados++;
+            } else {
+                // Existe en remoto: actualizar datos de negocio pero PRESERVAR whatsapp_notificado y whatsapp_mora
+                const rm = remoteMap[f.id_factura] || { wn: 'NO', wm: 'NO' };
+                await pool.execute(
+                    `UPDATE tab_facturas SET
+                     nro_factura=?, id_cliente=?, nombres=?, cedula=?, celular=?, telefono=?, direccion=?, zona=?,
+                     id_vendedor=?, vendedor=?, total=?, abono_factura=?, porcentaje=?, fecha_reg=?, pagada=?, anulado=?,
+                     descuento=?, total_desc=?,
+                     whatsapp_notificado=?, whatsapp_mora=?
+                     WHERE id_factura=?`,
+                    [f.nro_factura, f.id_cliente, f.nombres, f.cedula, f.celular, f.telefono, f.direccion, f.zona,
+                     f.id_vendedor, f.vendedor, f.total, f.abono_factura, f.porcentaje, f.fecha_reg, f.pagada, f.anulado,
+                     f.descuento || 0, f.total_desc || 0,
+                     rm.wn, rm.wm,
+                     f.id_factura]
+                );
+                actualizados++;
+            }
+        }
+
+        // 4. Sincronizar estados de WhatsApp del remoto → local
+        for (const [idFac, states] of Object.entries(remoteMap)) {
+            await poolLocal.execute(
+                "UPDATE tab_facturas SET whatsapp_notificado = ?, whatsapp_mora = ? WHERE id_factura = ?",
+                [states.wn, states.wm, idFac]
+            );
+        }
+
+        console.log(`[SYNC-FACTURAS] ✅ Insertados: ${insertados}, Actualizados: ${actualizados}, Preservados: ${Object.keys(remoteMap).length}`);
+        return { insertados, actualizados, preservados: Object.keys(remoteMap).length };
+    } catch (e) {
+        console.log("[SYNC-FACTURAS] Error:", e.message);
+        return { error: e.message };
+    }
+}
+
+// Sync inverso: remoto → local (cuando el sistema remoto crea facturas)
+async function syncFacturasRemotoALocal() {
+    try {
+        try { await poolLocal.execute("ALTER TABLE tab_facturas ADD COLUMN whatsapp_notificado VARCHAR(2) DEFAULT 'NO'"); } catch (e) {}
+        try { await poolLocal.execute("ALTER TABLE tab_facturas ADD COLUMN whatsapp_mora VARCHAR(2) DEFAULT 'NO'"); } catch (e) {}
+
+        const [remotos] = await pool.execute("SELECT * FROM tab_facturas");
+        let insertados = 0;
+        let actualizados = 0;
+
+        for (const f of remotos) {
+            const [existeLocal] = await poolLocal.execute("SELECT id_factura FROM tab_facturas WHERE id_factura = ?", [f.id_factura]);
+            if (existeLocal.length === 0) {
+                await poolLocal.execute(
+                    `INSERT INTO tab_facturas (id_factura, nro_factura, id_cliente, nombres, cedula, celular, telefono, direccion, zona,
+                     id_vendedor, vendedor, total, abono_factura, porcentaje, fecha_reg, pagada, anulado, descuento, total_desc,
+                     whatsapp_notificado, whatsapp_mora)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                    [f.id_factura, f.nro_factura, f.id_cliente, f.nombres, f.cedula, f.celular, f.telefono, f.direccion, f.zona,
+                     f.id_vendedor, f.vendedor, f.total, f.abono_factura, f.porcentaje, f.fecha_reg, f.pagada, f.anulado,
+                     f.descuento || 0, f.total_desc || 0, f.whatsapp_notificado || 'NO', f.whatsapp_mora || 'NO']
+                );
+                insertados++;
+            } else {
+                await poolLocal.execute(
+                    `UPDATE tab_facturas SET
+                     nro_factura=?, id_cliente=?, nombres=?, cedula=?, celular=?, telefono=?, direccion=?, zona=?,
+                     id_vendedor=?, vendedor=?, total=?, abono_factura=?, porcentaje=?, fecha_reg=?, pagada=?, anulado=?,
+                     descuento=?, total_desc=?,
+                     whatsapp_notificado=?, whatsapp_mora=?
+                     WHERE id_factura=?`,
+                    [f.nro_factura, f.id_cliente, f.nombres, f.cedula, f.celular, f.telefono, f.direccion, f.zona,
+                     f.id_vendedor, f.vendedor, f.total, f.abono_factura, f.porcentaje, f.fecha_reg, f.pagada, f.anulado,
+                     f.descuento || 0, f.total_desc || 0, f.whatsapp_notificado || 'NO', f.whatsapp_mora || 'NO',
+                     f.id_factura]
+                );
+                actualizados++;
+            }
+        }
+        console.log(`[SYNC-R→L] ✅ Insertados: ${insertados}, Actualizados: ${actualizados}`);
+        return { insertados, actualizados };
+    } catch (e) {
+        console.log("[SYNC-R→L] Error:", e.message);
+        return { error: e.message };
+    }
+}
+
 async function initDB() {
     try {
+        // Migración: agregar columnas de WhatsApp a tab_facturas en ambas BD
+        try { await pool.execute("ALTER TABLE tab_facturas ADD COLUMN whatsapp_notificado VARCHAR(2) DEFAULT 'NO'"); } catch (e) {}
+        try { await pool.execute("ALTER TABLE tab_facturas ADD COLUMN whatsapp_mora VARCHAR(2) DEFAULT 'NO'"); } catch (e) {}
+        try { await poolLocal.execute("ALTER TABLE tab_facturas ADD COLUMN whatsapp_notificado VARCHAR(2) DEFAULT 'NO'"); } catch (e) {}
+        try { await poolLocal.execute("ALTER TABLE tab_facturas ADD COLUMN whatsapp_mora VARCHAR(2) DEFAULT 'NO'"); } catch (e) {}
+
         await pool.execute(`CREATE TABLE IF NOT EXISTS control_chat (
             telefono VARCHAR(100) PRIMARY KEY, 
             usuario VARCHAR(50), 
@@ -1196,7 +1323,7 @@ const DELAY_ENTRE_FACTURAS_MS = 8000; // 8 segundos entre cada factura para pare
 // Marca como notificadas todas las facturas viejas al iniciar el bot para evitar envíos masivos
 async function marcarFacturasViejasComoNotificadas() {
     try {
-        const [result] = await pool.execute(
+        const [result] = await dualExecute(
             `UPDATE tab_facturas SET whatsapp_notificado = 'SI'
              WHERE whatsapp_notificado = 'NO' AND anulado = 'no' AND pagada = 'NO'
                AND fecha_reg < DATE_SUB(CURDATE(), INTERVAL 2 DAY)`
@@ -1228,7 +1355,7 @@ async function checkNuevasFacturas() {
         for (const f of facturas) {
             const jid = formatWhatsApp(f.celular);
             if (!jid) {
-                await pool.execute("UPDATE tab_facturas SET whatsapp_notificado = 'SI' WHERE id_factura = ?", [f.id_factura]);
+                await dualExecute("UPDATE tab_facturas SET whatsapp_notificado = 'SI' WHERE id_factura = ?", [f.id_factura]);
                 continue;
             }
             const fecha = new Date(f.fecha_reg).toISOString().split('T')[0];
@@ -1248,7 +1375,7 @@ async function checkNuevasFacturas() {
                 }
             }
 
-            await pool.execute("UPDATE tab_facturas SET whatsapp_notificado = 'SI' WHERE id_factura = ?", [f.id_factura]);
+            await dualExecute("UPDATE tab_facturas SET whatsapp_notificado = 'SI' WHERE id_factura = ?", [f.id_factura]);
             await humanDelay(6, 12); // Delay humano entre cada factura
         }
         if (enviados > 0) {
@@ -1263,6 +1390,7 @@ async function checkNuevasFacturas() {
 
 // ===== RECORDATORIOS DE FACTURAS VENCIDAS =====
 let recordatorioEjecutando = false;
+let primerEjecucionRecordatorio = true; // Evita disparar recordatorios al arrancar
 const MAX_RECORDATORIOS_POR_CICLO = 10; // Máximo recordatorios por cada ejecución diaria
 
 function obtenerNivelRecordatorio(dias) {
@@ -1284,6 +1412,11 @@ function obtenerTonoMensaje(nivel, f, monto, fecha, dias) {
 
 async function checkFacturasVencidas() {
     if (!isBotReady() || recordatorioEjecutando) return;
+    if (primerEjecucionRecordatorio) {
+        primerEjecucionRecordatorio = false;
+        console.log("[RECORDATORIO] Primera ejecución omitida (startup guard).");
+        return;
+    }
     recordatorioEjecutando = true;
     try {
         const facturas = await notificador.obtenerFacturasVencidas();
@@ -1331,9 +1464,16 @@ async function checkFacturasVencidas() {
 
 // ===== RECORDATORIO A VENDEDORES (COBRANZAS) =====
 let vendedorEjecutando = false;
+let primerEjecucionVendedor = true;
 
 async function checkVendedoresRecordatorio(force = false) {
     if (!isBotReady() || vendedorEjecutando) return;
+    if (!force && primerEjecucionVendedor) {
+        primerEjecucionVendedor = false;
+        console.log("[VENDEDORES] Primera ejecución omitida (startup guard).");
+        return;
+    }
+    primerEjecucionVendedor = false;
     vendedorEjecutando = true;
     try {
         const hoy = new Date().getDay();
@@ -1398,12 +1538,19 @@ async function checkVendedoresRecordatorio(force = false) {
 
 // ===== ENVIO DE ESTADISTICAS A CADA VENDEDOR =====
 let estadisticasEjecutando = false;
+let primerEjecucionEstadisticas = true;
 
 async function checkEstadisticasVendedores(force = false) {
     if (!isBotReady()) {
         console.log("[ESTADISTICAS] Bot no está listo para enviar estadísticas.");
         return;
     }
+    if (!force && primerEjecucionEstadisticas) {
+        primerEjecucionEstadisticas = false;
+        console.log("[ESTADISTICAS] Primera ejecución omitida (startup guard).");
+        return;
+    }
+    primerEjecucionEstadisticas = false;
     // Si se fuerza, ignoramos completamente si está bloqueado
     if (estadisticasEjecutando && !force) {
         console.log("[ESTADISTICAS] Omitido porque ya se encuentra en ejecución.");
@@ -1631,13 +1778,15 @@ async function startBot() {
     socketBot = sock;
     sock.ev.on('creds.update', saveCreds);
 
-    sock.ev.on('connection.update', (u) => {
+    sock.ev.on('connection.update', async (u) => {
         const { connection, lastDisconnect, qr } = u;
         if (qr) qrcode.toDataURL(qr, { scale: 10 }, (_, url) => qrCodeData = url);
         if (connection === 'open') { 
             qrCodeData = "ONLINE ✅"; 
             console.log("🚀 BOT MASTER ONLINE");
             if (!notificadorInterval) {
+                // MARCAR FACTURAS VIEJAS ANTES DE ACTIVAR NOTIFICADORES
+                await marcarFacturasViejasComoNotificadas();
                 // Esperar 30 segundos después de conectar antes de iniciar notificadores
                 // Esto evita que al reconectar se envíen todos los mensajes pendientes de golpe
                 console.log("[BOT] Esperando 30 segundos antes de activar notificadores...");
@@ -3702,6 +3851,53 @@ const server = http.createServer(async (req, res) => {
             }
             res.end(`<html><body style="font-family:sans-serif;padding:20px"><h2>✅ Sincronización completada</h2><p>Registros locales: ${locales.length}</p><p>Copiados a remoto: ${insertados}</p><p>Ya existían en remoto: ${locales.length - insertados}</p><a href="/" style="display:inline-block;margin-top:12px;padding:8px 20px;background:#333;color:#fff;border-radius:6px;text-decoration:none">Volver</a></body></html>`);
         } catch (e) { res.end("Error: " + e.message); }
+    } else if (routename === '/sync-facturas') {
+        const dir = query.dir || 'both'; // 'both', 'local-to-remote', 'remote-to-local'
+        res.writeHead(302, { 'Location': '/' });
+        res.end();
+        setTimeout(async () => {
+            try {
+                if (dir === 'both' || dir === 'local-to-remote') {
+                    console.log("[SYNC-FACTURAS] Iniciando Local → Remoto...");
+                    const r1 = await syncFacturasLocalRemoto();
+                    console.log("[SYNC-FACTURAS] Local → Remoto:", JSON.stringify(r1));
+                }
+                if (dir === 'both' || dir === 'remote-to-local') {
+                    console.log("[SYNC-FACTURAS] Iniciando Remoto → Local...");
+                    const r2 = await syncFacturasRemotoALocal();
+                    console.log("[SYNC-FACTURAS] Remoto → Local:", JSON.stringify(r2));
+                }
+                console.log("[SYNC-FACTURAS] ✅ Sincronización completada.");
+            } catch (e) {
+                console.log("[SYNC-FACTURAS] Error:", e.message);
+            }
+        }, 500);
+    } else if (routename === '/sync-facturas-status') {
+        // Ver estado de sincronización: diferencias entre local y remoto
+        try {
+            const [remotoCount] = await pool.execute("SELECT COUNT(*) as total FROM tab_facturas");
+            const [localCount] = await poolLocal.execute("SELECT COUNT(*) as total FROM tab_facturas");
+            const [remotoNotif] = await pool.execute("SELECT COUNT(*) as total FROM tab_facturas WHERE whatsapp_notificado = 'SI'");
+            const [localNotif] = await poolLocal.execute("SELECT COUNT(*) as total FROM tab_facturas WHERE whatsapp_notificado = 'SI'");
+            const [soloRemoto] = await pool.execute(
+                "SELECT COUNT(*) as total FROM tab_facturas f WHERE NOT EXISTS (SELECT 1 FROM tab_facturas fl WHERE fl.id_factura = f.id_factura)"
+            );
+
+            // Verificar si las columnas existen en local
+            let localHasCols = false;
+            try {
+                const [cols] = await poolLocal.execute("SHOW COLUMNS FROM tab_facturas LIKE 'whatsapp_notificado'");
+                localHasCols = cols.length > 0;
+            } catch (e) {}
+
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                remoto: { total: remotoCount[0].total, notificados: remotoNotif[0].total },
+                local: { total: localCount[0].total, notificados: localNotif[0].total, tieneColumnasWH: localHasCols },
+                soloEnRemoto: soloRemoto[0].total,
+                diferencia: remotoCount[0].total - localCount[0].total
+            }, null, 2));
+        } catch (e) { res.end(JSON.stringify({ error: e.message })); }
     } else if (routename === '/historial-cliente') {
         const idCliente = parseInt(url.searchParams.get('id_cliente')) || 0;
         if (!idCliente) { res.end(JSON.stringify([])); return; }
@@ -3915,6 +4111,32 @@ ${hoyVis.length > 0 ? `
 <small class="text-white-50 text-uppercase" style="font-size:0.65rem;letter-spacing:0.5px">Sync</small>
 </div>
 <span class="fw-bold" style="font-size:0.95rem">Sincronizar Agenda</span>
+</div>
+</div>
+</a>
+</div>
+<div class="col-6 col-sm-4 col-md-3">
+<a href="/sync-facturas" class="text-decoration-none" onclick="return confirm('¿Sincronizar tab_facturas (Local ↔ Remoto)?\nSe preservarán los campos whatsapp_notificado y whatsapp_mora.')">
+<div class="card-dash h-100">
+<div class="card-body">
+<div class="d-flex align-items-center gap-3 mb-2">
+<div class="icon-box" style="background:rgba(255,193,7,0.2);color:#ffda6a"><i class="bi bi-arrow-left-right"></i></div>
+<small class="text-white-50 text-uppercase" style="font-size:0.65rem;letter-spacing:0.5px">Sync Fact</small>
+</div>
+<span class="fw-bold" style="font-size:0.95rem">Sincronizar Facturas</span>
+</div>
+</div>
+</a>
+</div>
+<div class="col-6 col-sm-4 col-md-3">
+<a href="/sync-facturas-status" class="text-decoration-none" target="_blank">
+<div class="card-dash h-100">
+<div class="card-body">
+<div class="d-flex align-items-center gap-3 mb-2">
+<div class="icon-box" style="background:rgba(108,117,125,0.2);color:#b0b5ba"><i class="bi bi-info-circle"></i></div>
+<small class="text-white-50 text-uppercase" style="font-size:0.65rem;letter-spacing:0.5px">Estado Sync</small>
+</div>
+<span class="fw-bold" style="font-size:0.95rem">Ver Estado Sync</span>
 </div>
 </div>
 </a>
