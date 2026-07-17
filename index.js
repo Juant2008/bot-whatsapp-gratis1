@@ -50,6 +50,19 @@ const poolLocal = mysql.createPool({
     queueLimit: 0,
     charset: 'UTF8_SPANISH_CI'
 });
+
+// Flag: detectar si la BD local está disponible
+let localDBAvailable = false;
+(async () => {
+    try {
+        await poolLocal.execute("SELECT 1");
+        localDBAvailable = true;
+        console.log("[DB] ✅ BD Local disponible.");
+    } catch (e) {
+        localDBAvailable = false;
+        console.log("[DB] ⚠️ BD Local no disponible (normal en Render).");
+    }
+})();
 const dualExecute = async (sql, params) => {
     const r = await pool.execute(sql, params);
     try { await poolLocal.execute(sql, params); } catch (e) { console.log("[DUAL] Local error:", e.message); }
@@ -403,7 +416,7 @@ function contarEnvio() { enviadosHoy++; }
 
 async function guardarMensaje(tel, rol, contenido) {
     try {
-        await pool.execute("INSERT INTO historial_chat (telefono, rol, contenido) VALUES (?, ?, ?)", [tel, rol, contenido]);
+        await dualExecute("INSERT INTO historial_chat (telefono, rol, contenido) VALUES (?, ?, ?)", [tel, rol, contenido]);
     } catch (e) { console.log("Error guardando historial"); }
 }
 
@@ -1739,7 +1752,7 @@ async function checkEstadisticasVendedores(force = false) {
         }
 
         if (!force) {
-            await pool.execute("INSERT INTO envio_estadisticas_log (fecha_envio) VALUES (?)", [hoyStr]);
+            await dualExecute("INSERT INTO envio_estadisticas_log (fecha_envio) VALUES (?)", [hoyStr]);
         }
         
         console.log(`[ESTADISTICAS] Reportes individuales enviados correctamente.`);
