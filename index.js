@@ -437,6 +437,83 @@ async function clearSesionDatos(tel) {
     } catch (e) {}
 }
 
+async function ensureTablaPedidos() {
+    try {
+        await pool.execute(`CREATE TABLE IF NOT EXISTS tab_pedidos (
+            id_factura INT AUTO_INCREMENT PRIMARY KEY,
+            nro_factura INT NOT NULL,
+            fecha_reg DATE,
+            nombres VARCHAR(150),
+            celular VARCHAR(50),
+            total DECIMAL(12,2) DEFAULT 0,
+            id_vendedor INT DEFAULT 0,
+            vendedor VARCHAR(100),
+            sub_vendedor VARCHAR(100),
+            celular_vendedor VARCHAR(50),
+            pagada VARCHAR(2) DEFAULT 'NO',
+            anulado VARCHAR(5) DEFAULT 'no'
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_spanish_ci`);
+        try { await pool.execute("ALTER TABLE tab_pedidos ADD COLUMN sub_vendedor VARCHAR(100) AFTER vendedor"); } catch (e) {}
+        try { await pool.execute("ALTER TABLE tab_pedidos ADD COLUMN celular_vendedor VARCHAR(50) AFTER sub_vendedor"); } catch (e) {}
+    } catch (e) {
+        console.log("[DB] ensureTablaPedidos: No se pudo crear tab_pedidos:", e.message);
+        return false;
+    }
+    try {
+        await pool.execute(`CREATE TABLE IF NOT EXISTS tab_pedidos_reng (
+            id_renglon INT AUTO_INCREMENT PRIMARY KEY,
+            id_factura INT,
+            nro_reglon INT,
+            producto VARCHAR(50),
+            cantidad INT,
+            precio_unitario DECIMAL(12,2),
+            precio_total DECIMAL(12,2),
+            tipo VARCHAR(50),
+            fecha_reg DATE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_spanish_ci`);
+    } catch (e) {
+        console.log("[DB] ensureTablaPedidos: No se pudo crear tab_pedidos_reng:", e.message);
+    }
+    try {
+        await pool.execute(`CREATE TABLE IF NOT EXISTS orden (
+            order_id INT AUTO_INCREMENT PRIMARY KEY,
+            customer_id INT,
+            cedula VARCHAR(20),
+            nombres VARCHAR(150),
+            direccion VARCHAR(200),
+            celular VARCHAR(50),
+            id_vendedor INT DEFAULT 0,
+            vendedor VARCHAR(100),
+            total_price DECIMAL(12,2) DEFAULT 0,
+            created DATETIME,
+            modified DATETIME,
+            status VARCHAR(2) DEFAULT '1',
+            facturado VARCHAR(5) DEFAULT 'NO',
+            pendiente VARCHAR(5) DEFAULT 'NO',
+            forma_de_pago VARCHAR(20) DEFAULT '',
+            facturar VARCHAR(5) DEFAULT '',
+            comentarios TEXT
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_spanish_ci`);
+    } catch (e) {
+        console.log("[DB] ensureTablaPedidos: No se pudo crear orden:", e.message);
+    }
+    try {
+        await pool.execute(`CREATE TABLE IF NOT EXISTS orden_articulos (
+            id_articulo INT AUTO_INCREMENT PRIMARY KEY,
+            order_id INT,
+            product_id INT DEFAULT 0,
+            producto VARCHAR(50),
+            descripcion VARCHAR(200),
+            quantity INT,
+            precio_unitario DECIMAL(12,2),
+            almacen VARCHAR(50) DEFAULT ''
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_spanish_ci`);
+    } catch (e) {
+        console.log("[DB] ensureTablaPedidos: No se pudo crear orden_articulos:", e.message);
+    }
+    return true;
+}
+
 async function restaurarSesiones() {
     try {
         const [rows] = await pool.execute("SELECT telefono, modo, datos FROM control_chat WHERE modo IN ('confirmando', 'visitando', 'esperando_cliente') AND datos IS NOT NULL");
@@ -1029,64 +1106,80 @@ async function initDB() {
             try { await poolLocal.execute("ALTER TABLE tab_agenda_visitas ADD UNIQUE INDEX uq_cliente_fecha (id_cliente, fecha)"); } catch (e) {}
         } catch (e) { console.log("[DB] Migración agenda local:", e.message); }
 
-        // TABLAS PARA PEDIDOS
-        await pool.execute(`CREATE TABLE IF NOT EXISTS tab_pedidos (
-            id_factura INT AUTO_INCREMENT PRIMARY KEY,
-            nro_factura INT NOT NULL,
-            fecha_reg DATE,
-            nombres VARCHAR(150),
-            celular VARCHAR(50),
-            total DECIMAL(12,2) DEFAULT 0,
-            id_vendedor INT DEFAULT 0,
-            vendedor VARCHAR(100),
-            sub_vendedor VARCHAR(100),
-            celular_vendedor VARCHAR(50),
-            pagada VARCHAR(2) DEFAULT 'NO',
-            anulado VARCHAR(5) DEFAULT 'no'
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_spanish_ci`);
+        // TABLAS PARA PEDIDOS — con try/catch por si no hay permisos CREATE
+        try {
+            await pool.execute(`CREATE TABLE IF NOT EXISTS tab_pedidos (
+                id_factura INT AUTO_INCREMENT PRIMARY KEY,
+                nro_factura INT NOT NULL,
+                fecha_reg DATE,
+                nombres VARCHAR(150),
+                celular VARCHAR(50),
+                total DECIMAL(12,2) DEFAULT 0,
+                id_vendedor INT DEFAULT 0,
+                vendedor VARCHAR(100),
+                sub_vendedor VARCHAR(100),
+                celular_vendedor VARCHAR(50),
+                pagada VARCHAR(2) DEFAULT 'NO',
+                anulado VARCHAR(5) DEFAULT 'no'
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_spanish_ci`);
+            console.log("[DB] ✅ tab_pedidos OK");
+        } catch (e) { console.log("[DB] tab_pedidos CREATE falló:", e.message); }
 
-        await pool.execute(`CREATE TABLE IF NOT EXISTS tab_pedidos_reng (
-            id_renglon INT AUTO_INCREMENT PRIMARY KEY,
-            id_factura INT,
-            nro_reglon INT,
-            producto VARCHAR(50),
-            cantidad INT,
-            precio_unitario DECIMAL(12,2),
-            precio_total DECIMAL(12,2),
-            tipo VARCHAR(50),
-            fecha_reg DATE
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_spanish_ci`);
+        try {
+            await pool.execute(`CREATE TABLE IF NOT EXISTS tab_pedidos_reng (
+                id_renglon INT AUTO_INCREMENT PRIMARY KEY,
+                id_factura INT,
+                nro_reglon INT,
+                producto VARCHAR(50),
+                cantidad INT,
+                precio_unitario DECIMAL(12,2),
+                precio_total DECIMAL(12,2),
+                tipo VARCHAR(50),
+                fecha_reg DATE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_spanish_ci`);
+            console.log("[DB] ✅ tab_pedidos_reng OK");
+        } catch (e) { console.log("[DB] tab_pedidos_reng CREATE falló:", e.message); }
 
-        await pool.execute(`CREATE TABLE IF NOT EXISTS orden (
-            order_id INT AUTO_INCREMENT PRIMARY KEY,
-            customer_id INT,
-            cedula VARCHAR(20),
-            nombres VARCHAR(150),
-            direccion VARCHAR(200),
-            celular VARCHAR(50),
-            id_vendedor INT DEFAULT 0,
-            vendedor VARCHAR(100),
-            total_price DECIMAL(12,2) DEFAULT 0,
-            created DATETIME,
-            modified DATETIME,
-            status VARCHAR(2) DEFAULT '1',
-            facturado VARCHAR(5) DEFAULT 'NO',
-            pendiente VARCHAR(5) DEFAULT 'NO',
-            forma_de_pago VARCHAR(20) DEFAULT '',
-            facturar VARCHAR(5) DEFAULT '',
-            comentarios TEXT
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_spanish_ci`);
+        try {
+            await pool.execute(`CREATE TABLE IF NOT EXISTS orden (
+                order_id INT AUTO_INCREMENT PRIMARY KEY,
+                customer_id INT,
+                cedula VARCHAR(20),
+                nombres VARCHAR(150),
+                direccion VARCHAR(200),
+                celular VARCHAR(50),
+                id_vendedor INT DEFAULT 0,
+                vendedor VARCHAR(100),
+                total_price DECIMAL(12,2) DEFAULT 0,
+                created DATETIME,
+                modified DATETIME,
+                status VARCHAR(2) DEFAULT '1',
+                facturado VARCHAR(5) DEFAULT 'NO',
+                pendiente VARCHAR(5) DEFAULT 'NO',
+                forma_de_pago VARCHAR(20) DEFAULT '',
+                facturar VARCHAR(5) DEFAULT '',
+                comentarios TEXT
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_spanish_ci`);
+            console.log("[DB] ✅ orden OK");
+        } catch (e) { console.log("[DB] orden CREATE falló:", e.message); }
 
-        await pool.execute(`CREATE TABLE IF NOT EXISTS orden_articulos (
-            id_articulo INT AUTO_INCREMENT PRIMARY KEY,
-            order_id INT,
-            product_id INT DEFAULT 0,
-            producto VARCHAR(50),
-            descripcion VARCHAR(200),
-            quantity INT,
-            precio_unitario DECIMAL(12,2),
-            almacen VARCHAR(50) DEFAULT ''
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_spanish_ci`);
+        try {
+            await pool.execute(`CREATE TABLE IF NOT EXISTS orden_articulos (
+                id_articulo INT AUTO_INCREMENT PRIMARY KEY,
+                order_id INT,
+                product_id INT DEFAULT 0,
+                producto VARCHAR(50),
+                descripcion VARCHAR(200),
+                quantity INT,
+                precio_unitario DECIMAL(12,2),
+                almacen VARCHAR(50) DEFAULT ''
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_spanish_ci`);
+            console.log("[DB] ✅ orden_articulos OK");
+        } catch (e) { console.log("[DB] orden_articulos CREATE falló:", e.message); }
+
+        // Migración: agregar columnas faltantes en tab_pedidos
+        try { await pool.execute("ALTER TABLE tab_pedidos ADD COLUMN sub_vendedor VARCHAR(100) AFTER vendedor"); } catch (e) {}
+        try { await pool.execute("ALTER TABLE tab_pedidos ADD COLUMN celular_vendedor VARCHAR(50) AFTER sub_vendedor"); } catch (e) {}
 
         console.log("✅ Base de Datos vinculada.");
     } catch (e) { console.log("❌ Error DB Init:", e.message); }
@@ -2659,10 +2752,20 @@ Mientras tanto, puede consultar el detalle de sus facturas pendientes aquí:
                         await setModo(from, 'bot');
                         return;
                     }
+                    // Asegurar que las tablas existan ANTES de intentar insertar
+                    await ensureTablaPedidos();
                     try {
                         const hoy = new Date().toISOString().split('T')[0];
-                        const [maxNro] = await pool.execute("SELECT COALESCE(MAX(nro_factura),0)+1 as next FROM tab_pedidos");
-                        const nro = maxNro[0].next;
+                        let nro;
+                        try {
+                            const [maxNro] = await pool.execute("SELECT COALESCE(MAX(nro_factura),0)+1 as next FROM tab_pedidos");
+                            nro = maxNro[0].next;
+                        } catch (eTab) {
+                            console.log("[PEDIDO] tab_pedidos no existe, creando...");
+                            await ensureTablaPedidos();
+                            const [maxNro] = await pool.execute("SELECT COALESCE(MAX(nro_factura),0)+1 as next FROM tab_pedidos");
+                            nro = maxNro[0].next;
+                        }
                         const jidParts = from.split('@');
                         const rawTel = jidParts[0].replace(/\D/g, '');
                         const isLid = jidParts[1] && jidParts[1].includes('lid');
@@ -2693,23 +2796,17 @@ Mientras tanto, puede consultar el detalle de sus facturas pendientes aquí:
                                 let idProducto = 0;
                                 let descripcion = '';
                                 try {
-                                    console.log("[ORDEN_ART] Buscando id_producto para:", it.codigo);
                                     const [prods] = await pool.execute("SELECT id_producto, descripcion FROM tab_productos WHERE producto = ? LIMIT 1", [it.codigo]);
                                     if (prods.length > 0) {
                                         idProducto = prods[0].id_producto || 0;
                                         descripcion = prods[0].descripcion || '';
-                                        console.log("[ORDEN_ART] Encontrado id_producto:", idProducto);
-                                    } else {
-                                        console.log("[ORDEN_ART] Producto no encontrado en tab_productos:", it.codigo);
                                     }
                                 } catch (e) { console.log("[ORDEN_ART] Error consultando producto:", e.message); }
                                 try {
-                                    console.log("[ORDEN_ART] Insertando articulo ordenId:", ordenId, "producto:", it.codigo, "qty:", it.cantidad, "precio:", it.precio);
                                     await pool.execute(
                                         "INSERT INTO orden_articulos (order_id, product_id, producto, descripcion, quantity, precio_unitario, almacen) VALUES (?, ?, ?, ?, ?, ?, ?)",
                                         [ordenId, idProducto, it.codigo, descripcion, it.cantidad, it.precio, '']
                                     );
-                                    console.log("[ORDEN_ART] OK");
                                 } catch (e) { console.log("[ORDEN_ART] Error insertando:", e.message); }
                             }
                         } catch (e) { console.log("[ORDEN] Error:", e.message, e.sqlMessage || ''); }
@@ -2718,7 +2815,11 @@ Mientras tanto, puede consultar el detalle de sus facturas pendientes aquí:
                             await safeSendMessage(aj, { text: `📦 *NUEVO PEDIDO CONFIRMADO #${nro}*\nCliente: ${data.pushName || tel}\nTotal: $${tot.toFixed(2)}\nVendedor: ${data.vendedor?.nombre || 'N/A'}\n\n_Ver pedido en el sistema_` });
                         }
                         await safeSendMessage(from, { text: `✅ *Pedido #${nro} confirmado con éxito!*\n\nUn administrador lo revisará pronto. ¡Gracias por su preferencia! 🙏` });
-                    } catch (e) { console.log("[PEDIDO] Error al guardar:", e.message, e.sqlMessage || ''); await safeSendMessage(from, { text: "❌ Ocurrió un error al confirmar el pedido. Intente nuevamente." }); }
+                    } catch (e) {
+                        console.log("[PEDIDO] Error al guardar:", e.message, e.sqlMessage || '');
+                        console.log("[PEDIDO] STACK:", e.stack);
+                        await safeSendMessage(from, { text: "❌ Ocurrió un error al confirmar el pedido. Intente nuevamente." });
+                    }
                     pendientesConfirmacion.delete(from);
                     await clearSesionDatos(from);
                     await setModo(from, 'bot');
