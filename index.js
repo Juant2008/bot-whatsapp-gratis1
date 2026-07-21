@@ -1029,6 +1029,65 @@ async function initDB() {
             try { await poolLocal.execute("ALTER TABLE tab_agenda_visitas ADD UNIQUE INDEX uq_cliente_fecha (id_cliente, fecha)"); } catch (e) {}
         } catch (e) { console.log("[DB] Migración agenda local:", e.message); }
 
+        // TABLAS PARA PEDIDOS
+        await pool.execute(`CREATE TABLE IF NOT EXISTS tab_pedidos (
+            id_factura INT AUTO_INCREMENT PRIMARY KEY,
+            nro_factura INT NOT NULL,
+            fecha_reg DATE,
+            nombres VARCHAR(150),
+            celular VARCHAR(50),
+            total DECIMAL(12,2) DEFAULT 0,
+            id_vendedor INT DEFAULT 0,
+            vendedor VARCHAR(100),
+            sub_vendedor VARCHAR(100),
+            celular_vendedor VARCHAR(50),
+            pagada VARCHAR(2) DEFAULT 'NO',
+            anulado VARCHAR(5) DEFAULT 'no'
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_spanish_ci`);
+
+        await pool.execute(`CREATE TABLE IF NOT EXISTS tab_pedidos_reng (
+            id_renglon INT AUTO_INCREMENT PRIMARY KEY,
+            id_factura INT,
+            nro_reglon INT,
+            producto VARCHAR(50),
+            cantidad INT,
+            precio_unitario DECIMAL(12,2),
+            precio_total DECIMAL(12,2),
+            tipo VARCHAR(50),
+            fecha_reg DATE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_spanish_ci`);
+
+        await pool.execute(`CREATE TABLE IF NOT EXISTS orden (
+            order_id INT AUTO_INCREMENT PRIMARY KEY,
+            customer_id INT,
+            cedula VARCHAR(20),
+            nombres VARCHAR(150),
+            direccion VARCHAR(200),
+            celular VARCHAR(50),
+            id_vendedor INT DEFAULT 0,
+            vendedor VARCHAR(100),
+            total_price DECIMAL(12,2) DEFAULT 0,
+            created DATETIME,
+            modified DATETIME,
+            status VARCHAR(2) DEFAULT '1',
+            facturado VARCHAR(5) DEFAULT 'NO',
+            pendiente VARCHAR(5) DEFAULT 'NO',
+            forma_de_pago VARCHAR(20) DEFAULT '',
+            facturar VARCHAR(5) DEFAULT '',
+            comentarios TEXT
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_spanish_ci`);
+
+        await pool.execute(`CREATE TABLE IF NOT EXISTS orden_articulos (
+            id_articulo INT AUTO_INCREMENT PRIMARY KEY,
+            order_id INT,
+            product_id INT DEFAULT 0,
+            producto VARCHAR(50),
+            descripcion VARCHAR(200),
+            quantity INT,
+            precio_unitario DECIMAL(12,2),
+            almacen VARCHAR(50) DEFAULT ''
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_spanish_ci`);
+
         console.log("✅ Base de Datos vinculada.");
     } catch (e) { console.log("❌ Error DB Init:", e.message); }
 }
@@ -2653,13 +2712,13 @@ Mientras tanto, puede consultar el detalle de sus facturas pendientes aquí:
                                     console.log("[ORDEN_ART] OK");
                                 } catch (e) { console.log("[ORDEN_ART] Error insertando:", e.message); }
                             }
-                        } catch (e) { console.log("[ORDEN] Error:", e.message); }
+                        } catch (e) { console.log("[ORDEN] Error:", e.message, e.sqlMessage || ''); }
                         const adminJids = ADMIN_IDS.map(id => formatWhatsApp(id)).filter(Boolean);
                         for (const aj of adminJids) {
                             await safeSendMessage(aj, { text: `📦 *NUEVO PEDIDO CONFIRMADO #${nro}*\nCliente: ${data.pushName || tel}\nTotal: $${tot.toFixed(2)}\nVendedor: ${data.vendedor?.nombre || 'N/A'}\n\n_Ver pedido en el sistema_` });
                         }
                         await safeSendMessage(from, { text: `✅ *Pedido #${nro} confirmado con éxito!*\n\nUn administrador lo revisará pronto. ¡Gracias por su preferencia! 🙏` });
-                    } catch (e) { console.log("[PEDIDO] Error al guardar:", e.message); await safeSendMessage(from, { text: "❌ Ocurrió un error al confirmar el pedido. Intente nuevamente." }); }
+                    } catch (e) { console.log("[PEDIDO] Error al guardar:", e.message, e.sqlMessage || ''); await safeSendMessage(from, { text: "❌ Ocurrió un error al confirmar el pedido. Intente nuevamente." }); }
                     pendientesConfirmacion.delete(from);
                     await clearSesionDatos(from);
                     await setModo(from, 'bot');
