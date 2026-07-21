@@ -148,6 +148,7 @@ const MENU_INTENTIONS = {
 
 let qrCodeData = "Iniciando...";
 let socketBot = null;
+let botStarting = false; // Mutex para evitar llamadas concurrentes a startBot()
 let dolarInfo = { bcv: 'Cargando...', paralelo: 'Cargando...' };
 let notificadorInterval = null;
 const pendientesConfirmacion = new Map();
@@ -1921,6 +1922,12 @@ let sendConfig = { ...SEND_DEFAULTS };
 
 // ===== BOT WHATSAPP =====
 async function startBot() {
+    if (botStarting) {
+        console.log("[BOT] ⏳ Ya hay un intento de conexión en curso, omitiendo...");
+        return;
+    }
+    botStarting = true;
+
     if (socketBot) {
         try {
             socketBot.removeAllListeners();
@@ -1929,7 +1936,36 @@ async function startBot() {
         socketBot = null;
     }
 
-    const { state, saveCreds } = await useMultiFileAuthState('auth_info');
+    try {
+        // Asegurar que el directorio auth_info exista antes de intentar leer
+        const authDir = path.join(process.cwd(), 'auth_info');
+        if (!fs.existsSync(authDir)) {
+            fs.mkdirSync(authDir, { recursive: true });
+            console.log("[BOT] 📁 Directorio auth_info creado.");
+        }
+    } catch (e) {
+        console.log("[BOT] Error creando auth_info:", e.message);
+    }
+
+    let state, saveCreds;
+    try {
+        const auth = await useMultiFileAuthState('auth_info');
+        state = auth.state;
+        saveCreds = auth.saveCreds;
+    } catch (e) {
+        console.log("[BOT] ❌ Error cargando sesión (auth_info corrupta?):", e.message);
+        console.log("[BOT] 🔄 Limpiando auth_info y reiniciando...");
+        botStarting = false;
+        try {
+            const authDir = path.join(process.cwd(), 'auth_info');
+            if (fs.existsSync(authDir)) {
+                fs.rmSync(authDir, { recursive: true, force: true });
+            }
+        } catch (e) {}
+        setTimeout(() => startBot(), 5000);
+        return;
+    }
+
     const { version } = await fetchLatestBaileysVersion();
 
     const sock = makeWASocket({
@@ -1947,6 +1983,7 @@ async function startBot() {
         const { connection, lastDisconnect, qr } = u;
         if (qr) qrcode.toDataURL(qr, { scale: 10 }, (_, url) => qrCodeData = url);
         if (connection === 'open') { 
+            botStarting = false;
             qrCodeData = "ONLINE ✅"; 
             console.log("🚀 BOT MASTER ONLINE");
             if (!notificadorInterval) {
@@ -1966,11 +2003,12 @@ async function startBot() {
                 }, 30000);
                 
                 setInterval(() => {
-                    if (!isBotReady() && socketBot) startBot();
+                    if (!isBotReady() && socketBot && !botStarting) startBot();
                 }, 300000);
             }
         }
         if (connection === 'close') {
+            botStarting = false;
             const statusCode = (lastDisconnect?.error instanceof Boom)?.output?.statusCode;
             const errorMsg = lastDisconnect?.error?.message || '';
             const esLoggedOut = statusCode === DisconnectReason.loggedOut;
